@@ -1,5 +1,5 @@
 [package]
-name = "datadog-apm"
+name = "datadog-apm-sync"
 version = "0.1.2"
 authors = ["Fernando Gonçalves <fernando.goncalves@pipefy.com>"]
 edition = "2018"
