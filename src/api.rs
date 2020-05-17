@@ -1,9 +1,9 @@
 use crate::model::{Span, Trace};
+use serde::Serialize;
 use std::{
     collections::HashMap,
-    time::{Duration, UNIX_EPOCH}
+    time::{Duration, UNIX_EPOCH},
 };
-use serde::Serialize;
 
 fn fill_meta(span: &Span, env: Option<String>) -> HashMap<String, String> {
     let mut meta = HashMap::new();
@@ -48,7 +48,11 @@ pub struct RawTrace(Vec<RawSpan>);
 impl RawTrace {
     pub fn from_trace(trace: &Trace, service: &String, env: &Option<String>) -> RawTrace {
         RawTrace(
-            trace.spans.iter().map(|span| RawSpan::from_span(span, trace, service, env)).collect()
+            trace
+                .spans
+                .iter()
+                .map(|span| RawSpan::from_span(span, trace, service, env))
+                .collect(),
         )
     }
 }
@@ -70,7 +74,12 @@ pub struct RawSpan {
 }
 
 impl RawSpan {
-    pub fn from_span(span: &Span, trace: &Trace, service: &String, env: &Option<String>) -> RawSpan {
+    pub fn from_span(
+        span: &Span,
+        trace: &Trace,
+        service: &String,
+        env: &Option<String>,
+    ) -> RawSpan {
         RawSpan {
             service: service.clone(),
             trace_id: trace.id,
