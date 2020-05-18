@@ -41,7 +41,6 @@ jobs:
           toolchain: stable
           components: clippy
           override: true
-      - run: cd van-svc
       - uses: actions-rs/cargo@v1
         with:
           command: clippy
