@@ -46,7 +46,7 @@ fn duration_to_nanos(duration: Duration) -> u64 {
 pub struct RawTrace(Vec<RawSpan>);
 
 impl RawTrace {
-    pub fn from_trace(trace: &Trace, service: &String, env: &Option<String>) -> RawTrace {
+    pub fn from_trace(trace: &Trace, service: &str, env: &Option<String>) -> RawTrace {
         RawTrace(
             trace.spans.iter().map(|span| RawSpan::from_span(span, trace, service, env)).collect()
         )
@@ -70,9 +70,9 @@ pub struct RawSpan {
 }
 
 impl RawSpan {
-    pub fn from_span(span: &Span, trace: &Trace, service: &String, env: &Option<String>) -> RawSpan {
+    pub fn from_span(span: &Span, trace: &Trace, service: &str, env: &Option<String>) -> RawSpan {
         RawSpan {
-            service: service.clone(),
+            service: service.to_string(),
             trace_id: trace.id,
             span_id: span.id,
             name: span.name.clone(),
@@ -155,8 +155,8 @@ mod tests {
                 start: duration_to_nanos(span.start.duration_since(UNIX_EPOCH).unwrap()),
                 duration: duration_to_nanos(span.duration),
                 error: 0,
-                meta: meta,
-                metrics: metrics,
+                meta,
+                metrics,
             });
         }
         let raw_spans = RawTrace::from_trace(&trace, &config.service, &config.env);
