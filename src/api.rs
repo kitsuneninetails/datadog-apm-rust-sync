@@ -74,12 +74,7 @@ pub struct RawSpan {
 }
 
 impl RawSpan {
-    pub fn from_span(
-        span: &Span,
-        trace: &Trace,
-        service: &str,
-        env: &Option<String>,
-    ) -> RawSpan {
+    pub fn from_span(span: &Span, trace: &Trace, service: &str, env: &Option<String>) -> RawSpan {
         RawSpan {
             service: service.to_string(),
             trace_id: trace.id,
