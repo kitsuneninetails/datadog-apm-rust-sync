@@ -115,12 +115,9 @@ fn spawn_consume_buffer_task(buffer_receiver: mpsc::Receiver<Trace>, client: DdA
         loop {
             let client = client.clone();
 
-            match buffer_receiver.try_recv() {
-                Ok(trace) => {
-                    debug!("Pulled trace: {:?}", trace);
-                    client.send_traces(vec![trace]);
-                }
-                Err(_) => {}
+            if let Ok(trace) = buffer_receiver.try_recv() {
+                debug!("Pulled trace: {:?}", trace);
+                client.send_traces(vec![trace]);
             }
         }
     });
