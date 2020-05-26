@@ -6,5 +6,5 @@ mod api;
 
 pub use crate::{
     client::{DatadogTracing, Config},
-    model::{ErrorInfo, HttpInfo, Span, SqlInfo, Trace}
+    model::{ErrorInfo, HttpInfo, Span, SqlInfo}
 };
