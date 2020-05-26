@@ -34,7 +34,7 @@ fn fill_meta(span: &Span, env: Option<String>) -> HashMap<String, String> {
 
 fn fill_metrics() -> HashMap<String, f64> {
     let mut metrics = HashMap::new();
-    metrics.insert("_sampling_priority_v1".to_string(), 1f64);
+    metrics.insert("_sampling_priority_v1".to_string(), f64::from(1));
     metrics
 }
 
