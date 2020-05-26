@@ -5,10 +5,7 @@ use log::{debug, error, trace, warn};
 use serde_json::to_string;
 use std::sync::{mpsc, Arc, Mutex};
 
-use crate::{
-    model::Span,
-    api::RawSpan
-};
+use crate::{api::RawSpan, model::Span};
 
 #[derive(Debug, Clone)]
 pub struct DatadogTracing {
@@ -50,26 +47,24 @@ impl DatadogTracing {
             http_client: Arc::new(hyper::Client::new()),
         };
 
-        std::thread::spawn(
-            move || {
-                println!("Starting loop");
-                loop {
-                    let client = client.clone();
+        std::thread::spawn(move || {
+            println!("Starting loop");
+            loop {
+                let client = client.clone();
 
-                    match buffer_receiver.try_recv() {
-                        Ok(info) => {
-                            debug!("Pulled span: {:?}", info);
-                            client.send(info);
-                        }
-                        Err(mpsc::TryRecvError::Disconnected) => {
-                            warn!("Tracing channel disconnected, exiting");
-                            return;
-                        },
-                        _ => {}
+                match buffer_receiver.try_recv() {
+                    Ok(info) => {
+                        debug!("Pulled span: {:?}", info);
+                        client.send(info);
                     }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        warn!("Tracing channel disconnected, exiting");
+                        return;
+                    }
+                    _ => {}
                 }
             }
-        );
+        });
 
         DatadogTracing {
             buffer_sender: Arc::new(Mutex::new(buffer_sender)),
@@ -81,11 +76,11 @@ impl DatadogTracing {
             Ok(_) => {
                 debug!("trace enqueued");
                 Ok(())
-            },
+            }
             Err(err) => {
                 warn!("could not enqueue trace: {:?}", err);
                 Err(())
-            },
+            }
         }
     }
 }
@@ -116,8 +111,9 @@ impl DdAgentClient {
                     .body(payload.as_str());
 
                 match req.send() {
-                    Ok(resp) if resp.status.is_success()=>
-                        trace!("Sent to localhost agent: {:?}", resp),
+                    Ok(resp) if resp.status.is_success() => {
+                        trace!("Sent to localhost agent: {:?}", resp)
+                    }
                     Ok(resp) => error!("error from datadog agent: {:?}", resp),
                     Err(err) => error!("error sending traces to datadog: {:?}", err),
                 }
@@ -129,11 +125,11 @@ impl DdAgentClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Span, HttpInfo};
+    use crate::model::{HttpInfo, Span};
     use filter_logger::FilterLogger;
     use log::Level;
-    use std::time::{Duration, SystemTime};
     use std::collections::HashMap;
+    use std::time::{Duration, SystemTime};
 
     use rand::Rng;
 

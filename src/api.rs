@@ -121,10 +121,7 @@ mod tests {
         }
 
         let mut metrics = HashMap::new();
-        metrics.insert(
-            "_sampling_priority_v1".to_string(),
-            f64::from(1),
-        );
+        metrics.insert("_sampling_priority_v1".to_string(), f64::from(1));
 
         let expected = RawSpan {
             trace_id: span.trace_id,
