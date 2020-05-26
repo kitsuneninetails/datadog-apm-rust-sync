@@ -1,9 +1,9 @@
-use hyper::{method::Method};
+use hyper::method::Method;
 
 use hyper::header::{ContentLength, Headers};
-use log::{trace, debug, warn, error};
+use log::{debug, error, trace, warn};
 use serde_json::to_string;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 
 use crate::{
     model::Span,
@@ -47,7 +47,7 @@ impl DatadogTracing {
             env: config.env,
             service: config.service,
             endpoint: format!("http://{}:{}/v0.3/traces", config.host, config.port),
-            http_client: Arc::new(hyper::Client::new())
+            http_client: Arc::new(hyper::Client::new()),
         };
 
         std::thread::spawn(
@@ -72,7 +72,7 @@ impl DatadogTracing {
         );
 
         DatadogTracing {
-            buffer_sender: Arc::new(Mutex::new(buffer_sender))
+            buffer_sender: Arc::new(Mutex::new(buffer_sender)),
         }
     }
 
@@ -110,7 +110,9 @@ impl DdAgentClient {
                 headers.set(ContentLength(payload.len() as u64));
                 headers.set_raw("Content-Type", vec![b"application/json".to_vec()]);
                 headers.set_raw("X-Datadog-Trace-Count", vec![b"1".to_vec()]);
-                let req = self.http_client.request(Method::Post, &self.endpoint)
+                let req = self
+                    .http_client
+                    .request(Method::Post, &self.endpoint)
                     .body(payload.as_str());
 
                 match req.send() {

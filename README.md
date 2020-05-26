@@ -1,6 +1,7 @@
 # Datadog apm (sync-bsed) for Rust (fork from datadog-apm)
 
 [![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+![CI](https://github.com/kitsuneninetails/datadog-apm-rust-sync/workflows/CI/badge.svg)
 
 Based on a fork from <https://github.com/pipefy/datadog-apm-rust>.
 Original code written by Fernando Gonçalves (github: <https://github.com/fhsgoncalves>).

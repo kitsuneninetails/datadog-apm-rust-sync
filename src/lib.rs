@@ -1,8 +1,8 @@
 #![feature(async_closure)]
 
+mod api;
 mod client;
 mod model;
-mod api;
 
 pub use crate::{
     client::{DatadogTracing, Config},

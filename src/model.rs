@@ -1,5 +1,5 @@
-use std::time::{Duration, SystemTime};
 use std::collections::HashMap;
+use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone)]
 pub struct Span {
@@ -36,4 +36,3 @@ pub struct SqlInfo {
     pub rows: String,
     pub db: String,
 }
-
