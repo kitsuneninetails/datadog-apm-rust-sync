@@ -1,4 +1,4 @@
-use crate::model::{Span, Trace};
+use crate::model::Span;
 use serde::Serialize;
 use std::{
     collections::HashMap,
@@ -32,29 +32,14 @@ fn fill_meta(span: &Span, env: Option<String>) -> HashMap<String, String> {
     meta
 }
 
-fn fill_metrics(priority: u32) -> HashMap<String, f64> {
+fn fill_metrics() -> HashMap<String, f64> {
     let mut metrics = HashMap::new();
-    metrics.insert("_sampling_priority_v1".to_string(), f64::from(priority));
+    metrics.insert("_sampling_priority_v1".to_string(), f64::from(1));
     metrics
 }
 
 fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_secs() * 1_000_000_000 + duration.subsec_nanos() as u64
-}
-
-#[derive(Debug, Serialize, Clone, PartialEq)]
-pub struct RawTrace(Vec<RawSpan>);
-
-impl RawTrace {
-    pub fn from_trace(trace: &Trace, service: &str, env: &Option<String>) -> RawTrace {
-        RawTrace(
-            trace
-                .spans
-                .iter()
-                .map(|span| RawSpan::from_span(span, trace, service, env))
-                .collect(),
-        )
-    }
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -74,10 +59,10 @@ pub struct RawSpan {
 }
 
 impl RawSpan {
-    pub fn from_span(span: &Span, trace: &Trace, service: &str, env: &Option<String>) -> RawSpan {
+    pub fn from_span(span: &Span, service: &String, env: &Option<String>) -> RawSpan {
         RawSpan {
-            service: service.to_string(),
-            trace_id: trace.id,
+            service: service.clone(),
+            trace_id: span.trace_id,
             span_id: span.id,
             name: span.name.clone(),
             resource: span.resource.clone(),
@@ -85,9 +70,9 @@ impl RawSpan {
             start: duration_to_nanos(span.start.duration_since(UNIX_EPOCH).unwrap()),
             duration: duration_to_nanos(span.duration),
             error: if span.error.is_some() { 1 } else { 0 },
-            r#type: span.r#type.clone(),
+            r#type: "custom".to_string(),
             meta: fill_meta(&span, env.clone()),
-            metrics: fill_metrics(trace.priority),
+            metrics: fill_metrics(),
         }
     }
 }
@@ -110,61 +95,51 @@ mod tests {
             ..Default::default()
         };
         let mut rng = rand::thread_rng();
-        let trace = Trace {
+        let span = Span {
             id: rng.gen::<u64>(),
-            priority: 1,
-            spans: vec![Span {
-                id: rng.gen::<u64>(),
-                name: String::from("request"),
-                resource: String::from("/home/v3"),
-                r#type: String::from("web"),
-                start: SystemTime::now(),
-                duration: Duration::from_secs(2),
-                parent_id: None,
-                http: Some(HttpInfo {
-                    url: String::from("/home/v3/2?trace=true"),
-                    method: String::from("GET"),
-                    status_code: String::from("200"),
-                }),
-                error: None,
-                sql: None,
-                tags: HashMap::new(),
-            }],
+            trace_id: rng.gen::<u64>(),
+            name: String::from("request"),
+            resource: String::from("/home/v3"),
+            start: SystemTime::now(),
+            duration: Duration::from_secs(2),
+            parent_id: None,
+            http: Some(HttpInfo {
+                url: String::from("/home/v3/2?trace=true"),
+                method: String::from("GET"),
+                status_code: String::from("200"),
+            }),
+            error: None,
+            sql: None,
+            tags: HashMap::new(),
         };
 
-        let mut expected = Vec::new();
-        for span in &trace.spans {
-            let mut meta: HashMap<String, String> = HashMap::new();
-            meta.insert("env".to_string(), config.env.clone().unwrap());
-            if let Some(http) = &span.http {
-                meta.insert("http.url".to_string(), http.url.clone());
-                meta.insert("http.method".to_string(), http.method.clone());
-                meta.insert("http.status_code".to_string(), http.status_code.clone());
-            }
-
-            let mut metrics = HashMap::new();
-            metrics.insert(
-                "_sampling_priority_v1".to_string(),
-                f64::from(trace.priority),
-            );
-
-            expected.push(RawSpan {
-                trace_id: trace.id,
-                span_id: span.id,
-                parent_id: span.parent_id,
-                name: span.name.clone(),
-                resource: span.resource.clone(),
-                service: config.service.clone(),
-                r#type: span.r#type.clone(),
-                start: duration_to_nanos(span.start.duration_since(UNIX_EPOCH).unwrap()),
-                duration: duration_to_nanos(span.duration),
-                error: 0,
-                meta,
-                metrics,
-            });
+        let mut meta: HashMap<String, String> = HashMap::new();
+        meta.insert("env".to_string(), config.env.clone().unwrap());
+        if let Some(http) = &span.http {
+            meta.insert("http.url".to_string(), http.url.clone());
+            meta.insert("http.method".to_string(), http.method.clone());
+            meta.insert("http.status_code".to_string(), http.status_code.clone());
         }
-        let raw_spans = RawTrace::from_trace(&trace, &config.service, &config.env);
 
-        assert_eq!(raw_spans.0, expected);
+        let mut metrics = HashMap::new();
+        metrics.insert("_sampling_priority_v1".to_string(), f64::from(1));
+
+        let expected = RawSpan {
+            trace_id: span.trace_id,
+            span_id: span.id,
+            parent_id: span.parent_id,
+            name: span.name.clone(),
+            resource: span.resource.clone(),
+            service: config.service.clone(),
+            r#type: "custom".into(),
+            start: duration_to_nanos(span.start.duration_since(UNIX_EPOCH).unwrap()),
+            duration: duration_to_nanos(span.duration),
+            error: 0,
+            meta: meta,
+            metrics: metrics,
+        };
+        let raw_span = RawSpan::from_span(&span, &config.service, &config.env);
+
+        assert_eq!(raw_span, expected);
     }
 }

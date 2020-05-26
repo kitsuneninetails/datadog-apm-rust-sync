@@ -5,11 +5,11 @@ use log::{debug, error, trace, warn};
 use serde_json::to_string;
 use std::sync::{mpsc, Arc, Mutex};
 
-use crate::{api::RawTrace, model::Trace};
+use crate::{api::RawSpan, model::Span};
 
 #[derive(Debug, Clone)]
 pub struct DatadogTracing {
-    buffer_sender: Arc<Mutex<mpsc::Sender<Trace>>>,
+    buffer_sender: Arc<Mutex<mpsc::Sender<Span>>>,
 }
 
 /// Configuration settings for the client.
@@ -47,18 +47,41 @@ impl DatadogTracing {
             http_client: Arc::new(hyper::Client::new()),
         };
 
-        spawn_consume_buffer_task(buffer_receiver, client);
+        std::thread::spawn(move || {
+            println!("Starting loop");
+            loop {
+                let client = client.clone();
+
+                match buffer_receiver.try_recv() {
+                    Ok(info) => {
+                        debug!("Pulled span: {:?}", info);
+                        client.send(info);
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        warn!("Tracing channel disconnected, exiting");
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        });
 
         DatadogTracing {
             buffer_sender: Arc::new(Mutex::new(buffer_sender)),
         }
     }
 
-    pub fn send_trace(&self, trace: Trace) {
-        match self.buffer_sender.lock().unwrap().send(trace) {
-            Ok(_) => trace!("trace enqueued"),
-            Err(err) => warn!("could not enqueue trace: {:?}", err),
-        };
+    pub fn send(&self, info: Span) -> Result<(), ()> {
+        match self.buffer_sender.lock().unwrap().send(info) {
+            Ok(_) => {
+                debug!("trace enqueued");
+                Ok(())
+            }
+            Err(err) => {
+                warn!("could not enqueue trace: {:?}", err);
+                Err(())
+            }
+        }
     }
 }
 
@@ -71,14 +94,9 @@ struct DdAgentClient {
 }
 
 impl DdAgentClient {
-    fn send_traces(self, traces: Vec<Trace>) {
-        let traces = traces
-            .iter()
-            .map(|trace| RawTrace::from_trace(trace, &self.service, &self.env))
-            .collect::<Vec<RawTrace>>();
-
-        let trace_count = traces.len();
-        match to_string(&traces) {
+    fn send(self, info: Span) {
+        let span = vec![vec![RawSpan::from_span(&info, &self.service, &self.env)]];
+        match to_string(&span) {
             Err(e) => warn!("Couldn't encode payload for datadog: {:?}", e),
             Ok(payload) => {
                 debug!("Sending to localhost agent payload: {:?}", payload);
@@ -93,14 +111,10 @@ impl DdAgentClient {
                     .body(payload.as_str());
 
                 match req.send() {
-                    Ok(resp) => {
-                        debug!("Sent to localhost agent: {:?}", resp);
-                        if resp.status.is_success() {
-                            trace!("{} traces sent to datadog", trace_count)
-                        } else {
-                            error!("error sending traces to datadog: {:?}", resp)
-                        }
+                    Ok(resp) if resp.status.is_success() => {
+                        trace!("Sent to localhost agent: {:?}", resp)
                     }
+                    Ok(resp) => error!("error from datadog agent: {:?}", resp),
                     Err(err) => error!("error sending traces to datadog: {:?}", err),
                 }
             }
@@ -108,60 +122,65 @@ impl DdAgentClient {
     }
 }
 
-fn spawn_consume_buffer_task(buffer_receiver: mpsc::Receiver<Trace>, client: DdAgentClient) {
-    debug!("Spawning channel reader");
-    std::thread::spawn(move || {
-        debug!("Starting loop");
-        loop {
-            let client = client.clone();
-
-            if let Ok(trace) = buffer_receiver.try_recv() {
-                debug!("Pulled trace: {:?}", trace);
-                client.send_traces(vec![trace]);
-            }
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
-    extern crate rand;
-
     use super::*;
     use crate::model::{HttpInfo, Span};
+    use filter_logger::FilterLogger;
+    use log::Level;
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime};
 
     use rand::Rng;
 
-    fn _test_send_trace() {
+    #[test]
+    fn test_send_trace() {
+        FilterLogger::init(Level::Debug, vec!["hyper::".into(), "mime".into()], vec![]);
         let config = Config {
-            service: String::from("service_name"),
+            service: String::from("datadog_apm_test"),
+            env: Some("staging-01".into()),
             ..Default::default()
         };
         let client = DatadogTracing::new(config);
         let mut rng = rand::thread_rng();
-        let trace = Trace {
-            id: rng.gen::<u64>(),
-            priority: 1,
-            spans: vec![Span {
-                id: rng.gen::<u64>(),
-                name: String::from("request"),
-                resource: String::from("/home/v3"),
-                r#type: String::from("web"),
-                start: SystemTime::now(),
-                duration: Duration::from_secs(2),
-                parent_id: None,
-                http: Some(HttpInfo {
-                    url: String::from("/home/v3/2?trace=true"),
-                    method: String::from("GET"),
-                    status_code: String::from("200"),
-                }),
-                error: None,
-                sql: None,
-                tags: HashMap::new(),
-            }],
+        let trace_id = rng.gen::<u64>();
+        let parent_span_id = rng.gen::<u64>();
+        let span = Span {
+            id: parent_span_id.clone(),
+            trace_id: trace_id.clone(),
+            name: String::from("request"),
+            resource: String::from("/home/v3"),
+            start: SystemTime::now(),
+            duration: Duration::from_secs(2),
+            parent_id: None,
+            http: Some(HttpInfo {
+                url: String::from("/home/v3/2?trace=true"),
+                method: String::from("GET"),
+                status_code: String::from("200"),
+            }),
+            error: None,
+            sql: None,
+            tags: HashMap::new(),
         };
-        client.send_trace(trace);
+        client.send(span).unwrap();
+        let span = Span {
+            id: rng.gen::<u64>(),
+            trace_id,
+            name: String::from("request_subspan"),
+            resource: String::from("/home/v3"),
+            start: SystemTime::now(),
+            duration: Duration::from_secs(2),
+            parent_id: Some(parent_span_id),
+            http: Some(HttpInfo {
+                url: String::from("/home/v3/2?trace=true"),
+                method: String::from("GET"),
+                status_code: String::from("200"),
+            }),
+            error: None,
+            sql: None,
+            tags: HashMap::new(),
+        };
+        client.send(span).unwrap();
+        ::std::thread::sleep(::std::time::Duration::from_millis(500));
     }
 }
