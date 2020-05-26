@@ -3,6 +3,7 @@ use std::{
     collections::HashMap,
     time::{Duration, UNIX_EPOCH},
 };
+use serde::Serialize;
 
 fn fill_meta(span: &Span, env: Option<String>) -> HashMap<String, String> {
     let mut meta = HashMap::new();
