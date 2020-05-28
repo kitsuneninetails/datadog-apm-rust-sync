@@ -6,7 +6,7 @@ use serde_json::to_string;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 
 use crate::{api::RawSpan, model::Span};
-use std::collections::{LinkedList, HashMap};
+use std::collections::{HashMap, LinkedList};
 
 /// Configuration settings for the client.
 #[derive(Debug)]
@@ -35,20 +35,20 @@ impl Default for Config {
 #[derive(Clone, Debug)]
 enum SpanState {
     SpanStart(u64, u64),
-    SpanEnd(Span)
+    SpanEnd(Span),
 }
 
 #[derive(Clone, Debug)]
 struct SpanStack {
     completed_spans: Vec<Span>,
-    current_span_stack: LinkedList<u64>
+    current_span_stack: LinkedList<u64>,
 }
 
 impl SpanStack {
     fn new() -> Self {
         SpanStack {
             completed_spans: vec![],
-            current_span_stack: LinkedList::new()
+            current_span_stack: LinkedList::new(),
         }
     }
 
@@ -64,27 +64,26 @@ impl SpanStack {
     fn end_span(&mut self, span: Span) -> bool {
         if let Some(span_id) = self.current_span_stack.pop_back() {
             let add_span = Span {
-                parent_id: span.parent_id
-                    .or_else(||
-                        self.current_span_stack.back().map(|i| i.clone())
-                    ),
+                parent_id: span
+                    .parent_id
+                    .or_else(|| self.current_span_stack.back().map(|i| i.clone())),
                 ..span
             };
             debug!("Pushing span to completed: {:?}", add_span);
             self.completed_spans.push(add_span);
         }
-        return self.current_span_stack.is_empty()
+        return self.current_span_stack.is_empty();
     }
 }
 
 struct SpanStorage {
-    inner: RwLock<HashMap<u64, SpanStack>>
+    inner: RwLock<HashMap<u64, SpanStack>>,
 }
 
 impl SpanStorage {
     fn new() -> Self {
         SpanStorage {
-            inner: RwLock::new(HashMap::new())
+            inner: RwLock::new(HashMap::new()),
         }
     }
 
@@ -107,7 +106,7 @@ impl SpanStorage {
     // Check if there's a trace for this span's trace ID.  If so, pop the span (which will send
     // the trace if there are no more spans).  If the current span list is empty after the
     // pop, then pop the entire SpanStack and return it (consuming so we can free memory).
-    fn end_span(&mut self, span: Span) -> Option<SpanStack>{
+    fn end_span(&mut self, span: Span) -> Option<SpanStack> {
         let trace_id = span.trace_id;
         let drop_stack = {
             let mut inner = self.inner.write().unwrap();
@@ -125,7 +124,6 @@ impl SpanStorage {
             None
         }
     }
-
 }
 
 fn trace_server_loop(client: DdAgentClient, buffer_receiver: mpsc::Receiver<SpanState>) {
@@ -137,17 +135,17 @@ fn trace_server_loop(client: DdAgentClient, buffer_receiver: mpsc::Receiver<Span
         match buffer_receiver.try_recv() {
             Ok(SpanState::SpanStart(trace_id, span_id)) => {
                 storage.start_span(trace_id, span_id);
-            },
+            }
             Ok(SpanState::SpanEnd(info)) => {
                 debug!("End span: {:?}", info);
                 if let Some(stack) = storage.end_span(info) {
                     client.send(stack);
                 }
-            },
+            }
             Err(mpsc::TryRecvError::Disconnected) => {
                 warn!("Tracing channel disconnected, exiting");
                 return;
-            },
+            }
             _ => {}
         }
     }
@@ -180,13 +178,19 @@ impl DatadogTracing {
     }
 
     pub fn start_span(&self, trace_id: u64, span_id: u64) -> Result<(), ()> {
-        self.buffer_sender.lock().unwrap().send(SpanState::SpanStart(trace_id, span_id))
+        self.buffer_sender
+            .lock()
+            .unwrap()
+            .send(SpanState::SpanStart(trace_id, span_id))
             .map(|_| ())
             .map_err(|_| ())
     }
 
     pub fn end_span(&self, info: Span) -> Result<(), ()> {
-        self.buffer_sender.lock().unwrap().send(SpanState::SpanEnd(info))
+        self.buffer_sender
+            .lock()
+            .unwrap()
+            .send(SpanState::SpanEnd(info))
             .map(|_| ())
             .map_err(|_| ())
     }
@@ -203,12 +207,11 @@ struct DdAgentClient {
 impl DdAgentClient {
     fn send(self, stack: SpanStack) {
         debug!("Sending stack to datadog: {:?}", stack);
-        let spans: Vec<Vec<RawSpan>> = vec![
-            stack.completed_spans
-                .into_iter()
-                .map(|s| RawSpan::from_span(&s, &self.service, &self.env))
-                .collect()
-        ];
+        let spans: Vec<Vec<RawSpan>> = vec![stack
+            .completed_spans
+            .into_iter()
+            .map(|s| RawSpan::from_span(&s, &self.service, &self.env))
+            .collect()];
         debug!("Sending stack to datadog: {:?}", spans);
         match to_string(&spans) {
             Err(e) => warn!("Couldn't encode payload for datadog: {:?}", e),
