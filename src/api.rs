@@ -135,8 +135,8 @@ mod tests {
             start: duration_to_nanos(span.start.duration_since(UNIX_EPOCH).unwrap()),
             duration: duration_to_nanos(span.duration),
             error: 0,
-            meta: meta,
-            metrics: metrics,
+            meta,
+            metrics,
         };
         let raw_span = RawSpan::from_span(&span, &config.service, &config.env);
 
