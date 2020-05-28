@@ -62,17 +62,17 @@ impl SpanStack {
     // still "current" spans after popping the current one (indicating that the next on the
     // stack is the current span's "parent").
     fn end_span(&mut self, span: Span) -> bool {
-        if let Some(span_id) = self.current_span_stack.pop_back() {
+        if self.current_span_stack.pop_back().is_some() {
             let add_span = Span {
                 parent_id: span
                     .parent_id
-                    .or_else(|| self.current_span_stack.back().map(|i| i.clone())),
+                    .or_else(|| self.current_span_stack.back().map(|i| *i)),
                 ..span
             };
             debug!("Pushing span to completed: {:?}", add_span);
             self.completed_spans.push(add_span);
         }
-        return self.current_span_stack.is_empty();
+        self.current_span_stack.is_empty()
     }
 }
 
