@@ -17,6 +17,9 @@ than a fork, as a PR against the original would be ill-advised, as it changes so
 decisions which I don't feel fair to impose upon the original author (his vision should guide the path the original 
 repo proceeds upon; this repo is just my vision for the original idea he came up with).
 
+This tracer has also been extended to become a Logger, allowing logs to be printed out with span and trace IDs.  This
+step also brings it closer to compatibility with rust-tracing and open-telemetry APIs.
+
 Modifications made to use Hyper 0.10 and remove all Tokio/Async+Await functionality:
 
 * Removed tokio crate.  

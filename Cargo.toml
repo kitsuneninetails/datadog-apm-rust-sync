@@ -1,16 +1,15 @@
 [package]
 name = "datadog-apm-sync"
 version = "0.1.2"
-authors = ["Fernando Gonçalves <fernando.goncalves@pipefy.com>"]
+authors = ["Michael Micucci <9975355+kitsuneninetails@users.noreply.github.com>", "Fernando Gonçalves <fernando.goncalves@pipefy.com> (original base code)"]
 edition = "2018"
 license = "MIT"
 readme = "README.md"
-description = "Datadog apm low level client for rust"
-homepage = "https://github.com/pipefy/datadog-apm-rust"
-documentation = "https://docs.rs/datadog-apm"
-repository = "https://github.com/pipefy/datadog-apm-rust"
+description = "Datadog APM-compatible tracer and logger for Rust"
+repository = "https://github.com/kitsuneninetails/datadog-apm-rust"
 
 [dependencies]
+chrono = "*"
 hyper = "0.10"
 filter-logger = "*"
 log = "0.4"
