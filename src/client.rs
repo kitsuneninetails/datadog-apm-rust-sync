@@ -37,10 +37,10 @@ impl Default for Config {
 
 #[derive(Clone, Debug)]
 pub struct LoggingConfig {
-    level: LogLevel,
-    time_format: String,
-    mod_filter: Vec<&'static str>,
-    body_filter: Vec<&'static str>,
+    pub level: LogLevel,
+    pub time_format: String,
+    pub mod_filter: Vec<&'static str>,
+    pub body_filter: Vec<&'static str>,
 }
 
 impl Default for LoggingConfig {
