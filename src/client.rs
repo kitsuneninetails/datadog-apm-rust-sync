@@ -1,7 +1,7 @@
 use hyper::method::Method;
 
 use hyper::header::{ContentLength, Headers};
-use log::{debug, info, error, trace, warn, Log, Level as LogLevel, Record};
+use log::{error, trace, warn, Level as LogLevel, Log, Record};
 use serde_json::to_string;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 
@@ -20,7 +20,7 @@ pub struct Config {
     /// Datadog agent port, defaults to `8196`.
     pub port: String,
     /// Optional Logging Config to also set this tracer as the main logger
-    pub logging_config: Option<LoggingConfig>
+    pub logging_config: Option<LoggingConfig>,
 }
 
 impl Default for Config {
@@ -30,7 +30,7 @@ impl Default for Config {
             host: "localhost".to_string(),
             port: "8126".to_string(),
             service: "".to_string(),
-            logging_config: None
+            logging_config: None,
         }
     }
 }
@@ -80,7 +80,7 @@ impl SpanStack {
         self.current_span_stack.push_back(id);
     }
 
-    // Move span to "completed" and return the current span ID of the back of the stack (or None
+    // Move span to "completed" and return the current span ID of the top of the stack (or None
     // if it's empty and time to remove the trace).  Unless already set, automatically set the
     // span's parent if there are still "current" spans after popping the current one (indicating
     // that the next on the stack is the current span's "parent").
@@ -111,7 +111,7 @@ impl SpanStorage {
         }
     }
 
-    // Either start a new trace with the span's trace ID (if there is no spans already
+    // Either start a new trace with the span's trace ID (if there is no span already
     // pushed for that trace ID), or push the span on the "current" stack of spans for that
     // trace ID.
     fn start_span(&mut self, trace_id: u64, span_id: u64) {
@@ -138,7 +138,8 @@ impl SpanStorage {
             } else {
                 return None;
             }
-        }.map(|id| (trace_id, id));
+        }
+        .map(|id| (trace_id, id));
 
         if self.last_span_id.is_none() {
             self.inner.write().unwrap().remove(&trace_id)
@@ -173,19 +174,23 @@ fn trace_server_loop(
             }
             Ok(SpanState::Log(record)) => {
                 if let Some(ref lc) = log_config {
-                    let skip = record.module.as_ref()
+                    let skip = record
+                        .module
+                        .as_ref()
                         .map(|m| {
-                            lc.mod_filter.iter()
+                            lc.mod_filter
+                                .iter()
                                 .filter(|f| m.contains(*f))
                                 .next()
                                 .is_some()
                         })
                         .unwrap_or(false);
-                    let body_skip =
-                        lc.body_filter.iter()
-                            .filter(|f| record.msg_str.contains(*f))
-                            .next()
-                            .is_some();
+                    let body_skip = lc
+                        .body_filter
+                        .iter()
+                        .filter(|f| record.msg_str.contains(*f))
+                        .next()
+                        .is_some();
                     if !skip && !body_skip {
                         if let Some((traceid, spanid)) = storage.current_span_id() {
                             println!(
@@ -221,7 +226,7 @@ fn trace_server_loop(
 #[derive(Debug, Clone)]
 pub struct DatadogTracing {
     buffer_sender: Arc<Mutex<mpsc::Sender<SpanState>>>,
-    log_config: Option<LoggingConfig>
+    log_config: Option<LoggingConfig>,
 }
 
 impl DatadogTracing {
@@ -242,7 +247,7 @@ impl DatadogTracing {
 
         let tracer = DatadogTracing {
             buffer_sender: Arc::new(Mutex::new(buffer_sender)),
-            log_config: config.logging_config
+            log_config: config.logging_config,
         };
 
         if let Some(ref lc) = tracer.log_config {
@@ -281,12 +286,6 @@ impl DatadogTracing {
 }
 
 impl Log for DatadogTracing {
-    /// Determines if a log message with the specified metadata would be
-    /// logged.
-    ///
-    /// This is used by the `log_enabled!` macro to allow callers to avoid
-    /// expensive computation of log message arguments if the message would be
-    /// discarded anyway.
     fn enabled(&self, metadata: &log::Metadata) -> bool {
         if let Some(ref lc) = self.log_config {
             metadata.level() <= lc.level
@@ -295,11 +294,6 @@ impl Log for DatadogTracing {
         }
     }
 
-    /// Logs the `Record`.
-    ///
-    /// Note that `enabled` is *not* necessarily called before this method.
-    /// Implementations of `log` should perform all necessary filtering
-    /// internally.
     fn log(&self, record: &Record) {
         if let Some(ref lc) = self.log_config {
             if record.level() <= lc.level {
@@ -309,18 +303,14 @@ impl Log for DatadogTracing {
                     level: record.level(),
                     time: now,
                     module: record.module_path().map(|s| s.to_string()),
-                    msg_str
+                    msg_str,
                 };
                 self.send_log(log_rec).unwrap_or_else(|_| ());
             }
         }
     }
 
-    /// Flushes any buffered records.
-    fn flush(&self) {
-
-    }
-
+    fn flush(&self) {}
 }
 
 #[derive(Debug, Clone)]
@@ -368,7 +358,7 @@ impl DdAgentClient {
 mod tests {
     use super::*;
     use crate::model::{HttpInfo, Span};
-    use log::Level;
+    use log::{debug, info, Level};
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime};
 
@@ -436,7 +426,9 @@ mod tests {
 
         client.end_span(span).unwrap();
 
-        error!("Test after subspan end, but still in parent span (should have trace-id and span-id)");
+        error!(
+            "Test after subspan end, but still in parent span (should have trace-id and span-id)"
+        );
         client.end_span(pspan).unwrap();
 
         debug!("Test after last span end (should have no span-id and trace-id info");
