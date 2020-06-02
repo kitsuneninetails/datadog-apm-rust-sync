@@ -1,15 +1,15 @@
 use hyper::method::Method;
 
 use hyper::header::{ContentLength, Headers};
-use log::{debug, error, trace, warn};
+use log::{error, trace, warn, Level as LogLevel, Log, Record};
 use serde_json::to_string;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 
-use crate::{api::RawSpan, model::Span};
+use crate::{api::RawSpan, model::Span, LogRecord};
 use std::collections::{HashMap, LinkedList};
 
 /// Configuration settings for the client.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Config {
     /// Datadog apm service name
     pub service: String,
@@ -19,6 +19,8 @@ pub struct Config {
     pub host: String,
     /// Datadog agent port, defaults to `8196`.
     pub port: String,
+    /// Optional Logging Config to also set this tracer as the main logger
+    pub logging_config: Option<LoggingConfig>,
 }
 
 impl Default for Config {
@@ -28,6 +30,26 @@ impl Default for Config {
             host: "localhost".to_string(),
             port: "8126".to_string(),
             service: "".to_string(),
+            logging_config: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LoggingConfig {
+    level: LogLevel,
+    time_format: String,
+    mod_filter: Vec<&'static str>,
+    body_filter: Vec<&'static str>,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        LoggingConfig {
+            level: LogLevel::Info,
+            time_format: "%Y-%m-%d %H:%M:%S%z".to_string(),
+            mod_filter: Vec::new(),
+            body_filter: Vec::new(),
         }
     }
 }
@@ -36,6 +58,7 @@ impl Default for Config {
 enum SpanState {
     SpanStart(u64, u64),
     SpanEnd(Span),
+    Log(LogRecord),
 }
 
 #[derive(Clone, Debug)]
@@ -57,11 +80,11 @@ impl SpanStack {
         self.current_span_stack.push_back(id);
     }
 
-    // Move span to "completed" and return true if it's time to send, or false to keep
-    // buffering the spans.  Unless already set, automatically set the span's parent if there are
-    // still "current" spans after popping the current one (indicating that the next on the
-    // stack is the current span's "parent").
-    fn end_span(&mut self, span: Span) -> bool {
+    // Move span to "completed" and return the current span ID of the top of the stack (or None
+    // if it's empty and time to remove the trace).  Unless already set, automatically set the
+    // span's parent if there are still "current" spans after popping the current one (indicating
+    // that the next on the stack is the current span's "parent").
+    fn end_span(&mut self, span: Span) -> Option<u64> {
         if self.current_span_stack.pop_back().is_some() {
             let add_span = Span {
                 parent_id: span
@@ -69,38 +92,38 @@ impl SpanStack {
                     .or_else(|| self.current_span_stack.back().map(|i| *i)),
                 ..span
             };
-            debug!("Pushing span to completed: {:?}", add_span);
             self.completed_spans.push(add_span);
         }
-        self.current_span_stack.is_empty()
+        self.current_span_stack.back().map(|id| *id)
     }
 }
 
 struct SpanStorage {
     inner: RwLock<HashMap<u64, SpanStack>>,
+    last_span_id: Option<(u64, u64)>,
 }
 
 impl SpanStorage {
     fn new() -> Self {
         SpanStorage {
             inner: RwLock::new(HashMap::new()),
+            last_span_id: None,
         }
     }
 
-    // Either start a new trace with the span's trace ID (if there is no spans already
+    // Either start a new trace with the span's trace ID (if there is no span already
     // pushed for that trace ID), or push the span on the "current" stack of spans for that
     // trace ID.
     fn start_span(&mut self, trace_id: u64, span_id: u64) {
         let mut inner = self.inner.write().unwrap();
         if let Some(ref mut ss) = inner.get_mut(&trace_id) {
-            debug!("Starting span: {}", span_id);
             ss.start_span(span_id);
         } else {
             let mut new_stack = SpanStack::new();
             new_stack.start_span(span_id);
-            debug!("Starting trace for span: {}", span_id);
             inner.insert(trace_id, new_stack);
         }
+        self.last_span_id = Some((trace_id, span_id));
     }
 
     // Check if there's a trace for this span's trace ID.  If so, pop the span (which will send
@@ -108,25 +131,33 @@ impl SpanStorage {
     // pop, then pop the entire SpanStack and return it (consuming so we can free memory).
     fn end_span(&mut self, span: Span) -> Option<SpanStack> {
         let trace_id = span.trace_id;
-        let drop_stack = {
+        self.last_span_id = {
             let mut inner = self.inner.write().unwrap();
             if let Some(ref mut ss) = inner.get_mut(&trace_id) {
-                debug!("Ending span: {:?}", span);
                 ss.end_span(span)
             } else {
-                false
+                return None;
             }
-        };
-        if drop_stack {
-            debug!("Dropping trace stack and returning for: {}", trace_id);
+        }
+        .map(|id| (trace_id, id));
+
+        if self.last_span_id.is_none() {
             self.inner.write().unwrap().remove(&trace_id)
         } else {
             None
         }
     }
+
+    fn current_span_id(&self) -> Option<(u64, u64)> {
+        self.last_span_id
+    }
 }
 
-fn trace_server_loop(client: DdAgentClient, buffer_receiver: mpsc::Receiver<SpanState>) {
+fn trace_server_loop(
+    client: DdAgentClient,
+    buffer_receiver: mpsc::Receiver<SpanState>,
+    log_config: Option<LoggingConfig>,
+) {
     let mut storage = SpanStorage::new();
 
     loop {
@@ -137,9 +168,50 @@ fn trace_server_loop(client: DdAgentClient, buffer_receiver: mpsc::Receiver<Span
                 storage.start_span(trace_id, span_id);
             }
             Ok(SpanState::SpanEnd(info)) => {
-                debug!("End span: {:?}", info);
                 if let Some(stack) = storage.end_span(info) {
                     client.send(stack);
+                }
+            }
+            Ok(SpanState::Log(record)) => {
+                if let Some(ref lc) = log_config {
+                    let skip = record
+                        .module
+                        .as_ref()
+                        .map(|m| {
+                            lc.mod_filter
+                                .iter()
+                                .filter(|f| m.contains(*f))
+                                .next()
+                                .is_some()
+                        })
+                        .unwrap_or(false);
+                    let body_skip = lc
+                        .body_filter
+                        .iter()
+                        .filter(|f| record.msg_str.contains(*f))
+                        .next()
+                        .is_some();
+                    if !skip && !body_skip {
+                        if let Some((traceid, spanid)) = storage.current_span_id() {
+                            println!(
+                                "{time} {level} [trace-id:{traceid} span-id:{spanid}] [{module}] {body}",
+                                time = record.time.format(lc.time_format.as_ref()),
+                                traceid = traceid,
+                                spanid = spanid,
+                                level = record.level,
+                                module = record.module.unwrap_or("-".to_string()),
+                                body = record.msg_str
+                            );
+                        } else {
+                            println!(
+                                "{time} {level} [{module}] {body}",
+                                time = record.time.format(lc.time_format.as_ref()),
+                                level = record.level,
+                                module = record.module.unwrap_or("-".to_string()),
+                                body = record.msg_str
+                            );
+                        }
+                    }
                 }
             }
             Err(mpsc::TryRecvError::Disconnected) => {
@@ -154,6 +226,7 @@ fn trace_server_loop(client: DdAgentClient, buffer_receiver: mpsc::Receiver<Span
 #[derive(Debug, Clone)]
 pub struct DatadogTracing {
     buffer_sender: Arc<Mutex<mpsc::Sender<SpanState>>>,
+    log_config: Option<LoggingConfig>,
 }
 
 impl DatadogTracing {
@@ -167,14 +240,21 @@ impl DatadogTracing {
             http_client: Arc::new(hyper::Client::new()),
         };
 
+        let log_config = config.logging_config.clone();
         std::thread::spawn(move || {
-            println!("Starting loop");
-            trace_server_loop(client, buffer_receiver);
+            trace_server_loop(client, buffer_receiver, log_config);
         });
 
-        DatadogTracing {
+        let tracer = DatadogTracing {
             buffer_sender: Arc::new(Mutex::new(buffer_sender)),
+            log_config: config.logging_config,
+        };
+
+        if let Some(ref lc) = tracer.log_config {
+            let _ = log::set_boxed_logger(Box::new(tracer.clone()));
+            log::set_max_level(lc.level.to_level_filter());
         }
+        tracer
     }
 
     pub fn start_span(&self, trace_id: u64, span_id: u64) -> Result<(), ()> {
@@ -194,6 +274,43 @@ impl DatadogTracing {
             .map(|_| ())
             .map_err(|_| ())
     }
+
+    pub fn send_log(&self, record: LogRecord) -> Result<(), ()> {
+        self.buffer_sender
+            .lock()
+            .unwrap()
+            .send(SpanState::Log(record))
+            .map(|_| ())
+            .map_err(|_| ())
+    }
+}
+
+impl Log for DatadogTracing {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        if let Some(ref lc) = self.log_config {
+            metadata.level() <= lc.level
+        } else {
+            false
+        }
+    }
+
+    fn log(&self, record: &Record) {
+        if let Some(ref lc) = self.log_config {
+            if record.level() <= lc.level {
+                let now = chrono::Utc::now();
+                let msg_str = format!("{}", record.args());
+                let log_rec = LogRecord {
+                    level: record.level(),
+                    time: now,
+                    module: record.module_path().map(|s| s.to_string()),
+                    msg_str,
+                };
+                self.send_log(log_rec).unwrap_or_else(|_| ());
+            }
+        }
+    }
+
+    fn flush(&self) {}
 }
 
 #[derive(Debug, Clone)]
@@ -206,17 +323,15 @@ struct DdAgentClient {
 
 impl DdAgentClient {
     fn send(self, stack: SpanStack) {
-        debug!("Sending stack to datadog: {:?}", stack);
         let spans: Vec<Vec<RawSpan>> = vec![stack
             .completed_spans
             .into_iter()
             .map(|s| RawSpan::from_span(&s, &self.service, &self.env))
             .collect()];
-        debug!("Sending stack to datadog: {:?}", spans);
         match to_string(&spans) {
             Err(e) => warn!("Couldn't encode payload for datadog: {:?}", e),
             Ok(payload) => {
-                debug!("Sending to localhost agent payload: {:?}", payload);
+                trace!("Sending to localhost agent payload: {:?}", payload);
 
                 let mut headers = Headers::new();
                 headers.set(ContentLength(payload.len() as u64));
@@ -243,8 +358,7 @@ impl DdAgentClient {
 mod tests {
     use super::*;
     use crate::model::{HttpInfo, Span};
-    use filter_logger::FilterLogger;
-    use log::Level;
+    use log::{debug, info, Level};
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime};
 
@@ -252,16 +366,21 @@ mod tests {
 
     #[test]
     fn test_send_trace() {
-        FilterLogger::init(Level::Debug, vec!["hyper::".into(), "mime".into()], vec![]);
         let config = Config {
             service: String::from("datadog_apm_test"),
             env: Some("staging-01".into()),
+            logging_config: Some(LoggingConfig {
+                level: Level::Debug,
+                mod_filter: vec!["hyper", "mime"],
+                ..LoggingConfig::default()
+            }),
             ..Default::default()
         };
         let client = DatadogTracing::new(config);
         let mut rng = rand::thread_rng();
         let trace_id = rng.gen::<u64>();
         let parent_span_id = rng.gen::<u64>();
+        debug!("Test before span start (should have no span-id and trace-id info");
         let pspan = Span {
             id: parent_span_id.clone(),
             trace_id: trace_id.clone(),
@@ -281,6 +400,7 @@ mod tests {
         };
         client.start_span(pspan.trace_id, pspan.id).unwrap();
 
+        debug!("Test in span (should have trace-id and span-id)");
         let span = Span {
             id: rng.gen::<u64>(),
             trace_id,
@@ -300,10 +420,18 @@ mod tests {
         };
         client.start_span(span.trace_id, span.id).unwrap();
 
+        info!("Test in subspan (should have trace-id and span-id)");
+
+        trace!("Should not print because below log level");
+
         client.end_span(span).unwrap();
 
+        error!(
+            "Test after subspan end, but still in parent span (should have trace-id and span-id)"
+        );
         client.end_span(pspan).unwrap();
 
+        debug!("Test after last span end (should have no span-id and trace-id info");
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 }
