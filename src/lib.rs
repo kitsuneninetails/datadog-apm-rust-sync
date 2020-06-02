@@ -1,11 +1,11 @@
 #![feature(async_closure)]
 
-mod api;
-mod client;
-mod model;
+pub mod api;
+pub mod client;
+pub mod model;
 
 pub use crate::{
-    client::{Config, DatadogTracing},
+    client::{Config, DatadogTracing, LoggingConfig},
     model::{ErrorInfo, HttpInfo, Span, SqlInfo},
 };
 
