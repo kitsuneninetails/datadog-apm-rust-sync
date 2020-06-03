@@ -8,4 +8,3 @@ pub use crate::{
     client::{Config, DatadogTracing, LoggingConfig},
     model::{ErrorInfo, HttpInfo, Span, SqlInfo},
 };
-

@@ -1,15 +1,15 @@
-use chrono::{Utc, DateTime, Duration};
+use chrono::{DateTime, Duration, Utc};
 use hyper::method::Method;
 
+use crate::{api::RawSpan, model::Span};
 use hyper::header::{ContentLength, Headers};
 use log::{error, trace, warn, Level as LogLevel, Log, Record};
 use serde_json::to_string;
 use std::{
-    sync::{mpsc, Arc, Mutex, RwLock},
     cell::RefCell,
-    collections::{HashMap, LinkedList}
+    collections::{HashMap, LinkedList},
+    sync::{mpsc, Arc, Mutex, RwLock},
 };
-use crate::{api::RawSpan, model::Span};
 
 /// Configuration settings for the client.
 #[derive(Clone, Debug)]
@@ -36,7 +36,7 @@ impl Default for Config {
             port: "8126".to_string(),
             service: "".to_string(),
             logging_config: None,
-            enable_tracing: false
+            enable_tracing: false,
         }
     }
 }
@@ -71,21 +71,13 @@ struct LogRecord {
 }
 
 #[derive(Clone, Debug)]
-enum EventType {
-    Error(crate::model::ErrorInfo),
-    Http(crate::model::HttpInfo),
-    Tag(String, String)
-}
-
-#[derive(Clone, Debug)]
 enum TraceCommand {
     Log(LogRecord),
     NewSpan(NewSpanData),
     Enter(u64, u64),
     Exit(u64, u64),
     CloseSpan(u64),
-    Record,
-    Event(u64, EventType),
+    Event(u64, Vec<(String, String)>),
 }
 
 #[derive(Debug, Clone)]
@@ -119,50 +111,39 @@ impl SpanCollection {
 
     // Move span to "completed" based on ID.  Return if there are current spans left or not/
     fn end_span(&mut self) -> bool {
-        self.current_spans.pop_back()
-            .map(|span| self.completed_spans.push(
-                Span {
-                    duration: Utc::now().signed_duration_since(span.start),
-                    ..span
-                }
-            ));
+        self.current_spans.pop_back().map(|span| {
+            self.completed_spans.push(Span {
+                duration: Utc::now().signed_duration_since(span.start),
+                ..span
+            })
+        });
         self.current_spans.is_empty()
     }
 
     fn err_span(&mut self, error: crate::model::ErrorInfo) {
-        self.current_spans.pop_back().map(
-            |span| self.current_spans.push_back(
-                Span {
-                    error: Some(error),
-                    ..span
-                }
-            )
-        );
+        self.current_spans.pop_back().map(|span| {
+            self.current_spans.push_back(Span {
+                error: Some(error),
+                ..span
+            })
+        });
     }
 
     fn add_http(&mut self, http: crate::model::HttpInfo) {
-        self.current_spans.pop_back().map(
-            |span| self.current_spans.push_back(
-                Span {
-                    http: Some(http),
-                    ..span
-                }
-            )
-        );
+        self.current_spans.pop_back().map(|span| {
+            self.current_spans.push_back(Span {
+                http: Some(http),
+                ..span
+            })
+        });
     }
 
     fn add_tag(&mut self, k: String, v: String) {
-        self.current_spans.pop_back()
-            .map(|span| {
-                let mut tags = span.tags;
-                tags.insert(k, v);
-                self.current_spans.push_back(
-                    Span {
-                        tags,
-                        ..span
-                    }
-                )
-            });
+        self.current_spans.pop_back().map(|span| {
+            let mut tags = span.tags;
+            tags.insert(k, v);
+            self.current_spans.push_back(Span { tags, ..span })
+        });
     }
 
     fn drain(&mut self) -> Vec<Span> {
@@ -171,13 +152,13 @@ impl SpanCollection {
 }
 
 struct SpanStorage {
-    traces: RwLock<HashMap<u64, SpanCollection>>,
+    traces: HashMap<u64, SpanCollection>,
 }
 
 impl SpanStorage {
     fn new() -> Self {
         SpanStorage {
-            traces: RwLock::new(HashMap::new())
+            traces: HashMap::new(),
         }
     }
 
@@ -186,20 +167,18 @@ impl SpanStorage {
     // trace ID.
     fn start_span(&mut self, span: Span) {
         let trace_id = span.trace_id;
-        let mut inner = self.traces.write().unwrap();
-        if let Some(ss) = inner.get_mut(&trace_id) {
+        if let Some(ss) = self.traces.get_mut(&trace_id) {
             ss.start_span(span);
         } else {
             let mut new_ss = SpanCollection::new();
             new_ss.start_span(span);
-            inner.insert(trace_id, new_ss);
+            self.traces.insert(trace_id, new_ss);
         }
     }
 
     /// End a span and possibly return the drained trace data if it was the last span on the stack
-    fn end_span(&mut self, trace_id: u64) -> Option<Vec<Span>>{
-        let mut inner = self.traces.write().unwrap();
-        if let Some(ref mut ss) = inner.get_mut(&trace_id) {
+    fn end_span(&mut self, trace_id: u64) -> Option<Vec<Span>> {
+        if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
             if ss.end_span() {
                 Some(ss.drain())
             } else {
@@ -212,24 +191,21 @@ impl SpanStorage {
 
     /// Record an error event on a span
     fn span_record_error(&mut self, trace_id: u64, error: crate::model::ErrorInfo) {
-        let mut inner = self.traces.write().unwrap();
-        if let Some(ref mut ss) = inner.get_mut(&trace_id) {
+        if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
             ss.err_span(error)
         }
     }
 
     /// Record HTTP info onto a span
     fn span_record_http(&mut self, trace_id: u64, http: crate::model::HttpInfo) {
-        let mut inner = self.traces.write().unwrap();
-        if let Some(ref mut ss) = inner.get_mut(&trace_id) {
+        if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
             ss.add_http(http)
         }
     }
 
     /// Record tag info onto a span
     fn span_record_tag(&mut self, trace_id: u64, key: String, value: String) {
-        let mut inner = self.traces.write().unwrap();
-        if let Some(ref mut ss) = inner.get_mut(&trace_id) {
+        if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
             ss.add_tag(key, value)
         }
     }
@@ -277,8 +253,8 @@ fn trace_server_loop(
                                     module = record.module.unwrap_or("-".to_string()),
                                     body = record.msg_str
                                 );
-                            },
-                            _ =>  {
+                            }
+                            _ => {
                                 println!(
                                     "{time} {level} [{module}] {body}",
                                     time = record.time.format(lc.time_format.as_ref()),
@@ -305,18 +281,65 @@ fn trace_server_loop(
                     error: None,
                     duration: Duration::seconds(0),
                 });
-
             }
-            Ok(TraceCommand::Enter(_trace_id, _id)) => {
-            }
-            Ok(TraceCommand::Exit(_trace_id, _id)) => {
-            }
+            Ok(TraceCommand::Enter(_trace_id, _id)) => {}
+            Ok(TraceCommand::Exit(_trace_id, _id)) => {}
             Ok(TraceCommand::Event(trace_id, event)) => {
-                match event {
-                    EventType::Error(e) => storage.write().unwrap().span_record_error(trace_id, e),
-                    EventType::Http(h) => storage.write().unwrap().span_record_http(trace_id, h),
-                    EventType::Tag(k, v) => storage.write().unwrap().span_record_tag(trace_id, k, v),
+                fn to_error_info(
+                    msg: Option<String>,
+                    t: Option<String>,
+                    st: Option<String>,
+                ) -> Option<crate::model::ErrorInfo> {
+                    if msg.is_some() || t.is_some() || st.is_some() {
+                        Some(crate::model::ErrorInfo {
+                            msg: msg.unwrap_or(String::new()),
+                            r#type: t.unwrap_or(String::new()),
+                            stack: st.unwrap_or(String::new()),
+                        })
+                    } else {
+                        None
+                    }
                 }
+                fn to_http_info(
+                    u: Option<String>,
+                    st: Option<String>,
+                    m: Option<String>,
+                ) -> Option<crate::model::HttpInfo> {
+                    if u.is_some() || st.is_some() || m.is_some() {
+                        Some(crate::model::HttpInfo {
+                            url: u.unwrap_or(String::new()),
+                            status_code: st.unwrap_or(String::new()),
+                            method: m.unwrap_or(String::new()),
+                        })
+                    } else {
+                        None
+                    }
+                }
+
+                let mut evt_map: HashMap<String, String> = event.into_iter().collect();
+                let http_evt = to_http_info(
+                    evt_map.remove("http_url"),
+                    evt_map.remove("http_status_code"),
+                    evt_map.remove("http_method"),
+                );
+
+                let err_evt = to_error_info(
+                    evt_map.remove("error_msg"),
+                    evt_map.remove("error_type"),
+                    evt_map.remove("error_stack"),
+                );
+
+                if let Some(h) = http_evt {
+                    storage.write().unwrap().span_record_http(trace_id, h);
+                }
+
+                if let Some(e) = err_evt {
+                    storage.write().unwrap().span_record_error(trace_id, e)
+                }
+
+                evt_map
+                    .into_iter()
+                    .for_each(|(k, v)| storage.write().unwrap().span_record_tag(trace_id, k, v));
             }
             Ok(TraceCommand::CloseSpan(trace_id)) => {
                 let ret = storage.write().unwrap().end_span(trace_id);
@@ -324,14 +347,11 @@ fn trace_server_loop(
                     client.send(stack);
                 }
             }
-            Ok(TraceCommand::Record) => {
-            }
             Err(mpsc::TryRecvError::Disconnected) => {
                 warn!("Tracing channel disconnected, exiting");
                 return;
             }
-            Err(_) => {
-            }
+            Err(_) => {}
         }
     }
 }
@@ -418,16 +438,7 @@ impl DatadogTracing {
             .map_err(|_| ())
     }
 
-    fn send_record(&self, _record: LogRecord) -> Result<(), ()> {
-        self.buffer_sender
-            .lock()
-            .unwrap()
-            .send(TraceCommand::Record)
-            .map(|_| ())
-            .map_err(|_| ())
-    }
-
-    fn send_event(&self, trace_id: u64, event: EventType) -> Result<(), ()> {
+    fn send_event(&self, trace_id: u64, event: Vec<(String, String)>) -> Result<(), ()> {
         self.buffer_sender
             .lock()
             .unwrap()
@@ -453,30 +464,49 @@ thread_local! {
     static CURRENT_SPAN_ID: RefCell<LinkedList<u64>> = RefCell::new(LinkedList::new());
 }
 
+pub struct EventVisitor {
+    fields: Vec<(String, String)>,
+}
+
+impl EventVisitor {
+    fn new() -> Self {
+        // Event vectors should never have more than five fields.
+        EventVisitor {
+            fields: Vec::with_capacity(5),
+        }
+    }
+}
+
+impl tracing::field::Visit for EventVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.fields
+            .push((field.name().to_string(), value.to_string()));
+    }
+    fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {
+        // Do nothing
+    }
+}
+
 impl tracing::Subscriber for DatadogTracing {
     fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
         match self.log_config {
             Some(ref lc) => log_level_to_trace_level(lc.level) >= *metadata.level(),
-            None => false
+            None => false,
         }
     }
 
     fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        let trace_id = TRACE_ID.with(|tr| {
-            match tr.try_borrow_mut() {
-                Ok(mut tr_id) => {
-                    if let Some(t) = *tr_id {
-                        t
-                    } else {
-                        let new_trace_id = Utc::now().timestamp_nanos() as u64;
-                        tr_id.replace(new_trace_id);
-                        new_trace_id
-                    }
-                },
-                Err(_) => {
-                    Utc::now().timestamp_nanos() as u64
+        let trace_id = TRACE_ID.with(|tr| match tr.try_borrow_mut() {
+            Ok(mut tr_id) => {
+                if let Some(t) = *tr_id {
+                    t
+                } else {
+                    let new_trace_id = Utc::now().timestamp_nanos() as u64;
+                    tr_id.replace(new_trace_id);
+                    new_trace_id
                 }
             }
+            Err(_) => Utc::now().timestamp_nanos() as u64,
         });
         let span_id = Utc::now().timestamp_nanos() as u64 + 1;
         let new_span = NewSpanData {
@@ -492,47 +522,46 @@ impl tracing::Subscriber for DatadogTracing {
     }
 
     fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, span: &tracing::span::Id, follows: &tracing::span::Id) {
-        println!("FOLLOWS FROM {:?} ====> {:?}", follows, span);
-    }
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
     fn event(&self, event: &tracing::Event<'_>) {
-        println!("EVENT: {:?}", event);
-        // TRACE_ID.with(|tr|
-        //     if let Some(ref trace_id) = *tr.borrow() {
-        //         self.send_event(*trace_id, event).unwrap_or(());
-        //     }
-        // );
+        let mut new_evt_visitor = EventVisitor::new();
+        event.record(&mut new_evt_visitor);
+        TRACE_ID.with(|tr| {
+            if let Some(ref trace_id) = *tr.borrow() {
+                self.send_event(*trace_id, new_evt_visitor.fields)
+                    .unwrap_or(());
+            }
+        });
     }
+
     fn enter(&self, span: &tracing::span::Id) {
-        CURRENT_SPAN_ID.with(|spans|
-            match spans.try_borrow_mut() {
-                Ok(mut r) => r.push_back(span.into_u64()),
-                Err(_) => {}
-            }
-        );
-        TRACE_ID.with(|tr|
+        CURRENT_SPAN_ID.with(|spans| match spans.try_borrow_mut() {
+            Ok(mut r) => r.push_back(span.into_u64()),
+            Err(_) => {}
+        });
+        TRACE_ID.with(|tr| {
             if let Some(ref trace_id) = *tr.borrow() {
-                self.send_enter_span(*trace_id, span.clone().into_u64()).unwrap_or(());
+                self.send_enter_span(*trace_id, span.clone().into_u64())
+                    .unwrap_or(());
             }
-        );
+        });
     }
-    fn clone_span(&self, id: &tracing::span::Id) -> tracing::span::Id {
-        println!("CLONE SPAN: {:?}", id);
-        id.clone()
-    }
+
     fn exit(&self, span: &tracing::span::Id) {
-        CURRENT_SPAN_ID.with(|spans|
-            match spans.try_borrow_mut() {
-                Ok(mut r) => r.pop_back(),
-                Err(_) => None
-            }
-        );
-        TRACE_ID.with(|tr|
+        CURRENT_SPAN_ID.with(|spans| match spans.try_borrow_mut() {
+            Ok(mut r) => r.pop_back(),
+            Err(_) => None,
+        });
+        TRACE_ID.with(|tr| {
             if let Some(ref trace_id) = *tr.borrow() {
-                self.send_exit_span(*trace_id, span.clone().into_u64()).unwrap_or(());
+                self.send_exit_span(*trace_id, span.clone().into_u64())
+                    .unwrap_or(());
             }
-        );
+        });
     }
+
     fn try_close(&self, _span: tracing::span::Id) -> bool {
         TRACE_ID.with(|tr| {
             if let Some(ref trace_id) = *tr.borrow() {
@@ -557,18 +586,16 @@ impl Log for DatadogTracing {
             if record.level() <= lc.level {
                 let now = chrono::Utc::now();
                 let msg_str = format!("{}", record.args());
-                let log_rec = TRACE_ID.with(|tr|
-                    CURRENT_SPAN_ID.with(|sp|
-                        LogRecord {
-                            span_id: sp.borrow().back().clone().map(|i| *i),
-                            trace_id: tr.borrow().clone(),
-                            level: record.level(),
-                            time: now,
-                            module: record.module_path().map(|s| s.to_string()),
-                            msg_str,
-                        }
-                    )
-                );
+                let log_rec = TRACE_ID.with(|tr| {
+                    CURRENT_SPAN_ID.with(|sp| LogRecord {
+                        span_id: sp.borrow().back().clone().map(|i| *i),
+                        trace_id: tr.borrow().clone(),
+                        level: record.level(),
+                        time: now,
+                        module: record.module_path().map(|s| s.to_string()),
+                        msg_str,
+                    })
+                });
                 self.send_log(log_rec).unwrap_or_else(|_| ());
             }
         }
@@ -621,10 +648,50 @@ impl DdAgentClient {
 mod tests {
     use super::*;
     use log::{debug, info, Level};
+    use tracing::event;
 
     #[tracing::instrument]
     async fn traced_func(id: u32) {
+        debug!("Performing some function for id={}", id);
         long_call(id).await;
+    }
+
+    #[tracing::instrument]
+    async fn traced_error_func(id: u32) {
+        debug!("Performing some function for id={}", id);
+        long_call(id).await;
+        event!(
+            tracing::Level::ERROR,
+            error_type = "",
+            error_msg = "Test error"
+        );
+        event!(
+            tracing::Level::ERROR,
+            http_url = "http://test.test/",
+            http_status_code = "400",
+            http_method = "GET"
+        );
+        event!(
+            tracing::Level::ERROR,
+            custom_tag = "good",
+            custom_tag2 = "test"
+        );
+    }
+
+    #[tracing::instrument]
+    async fn traced_error_func_single_event(id: u32) {
+        debug!("Performing some function for id={}", id);
+        long_call(id).await;
+        event!(
+            tracing::Level::ERROR,
+            error_type = "",
+            error_msg = "Test error",
+            http_url = "http://test.test/",
+            http_status_code = "400",
+            http_method = "GET",
+            custom_tag = "good",
+            custom_tag2 = "test"
+        );
     }
 
     #[tracing::instrument]
@@ -636,6 +703,7 @@ mod tests {
 
     #[tracing::instrument]
     fn sleep_call() {
+        debug!("Long call");
         std::thread::sleep(std::time::Duration::from_millis(2000));
     }
 
@@ -656,7 +724,14 @@ mod tests {
 
         let f1 = tokio::spawn(async move { traced_func(1).await });
         let f2 = tokio::spawn(async move { traced_func(2).await });
-        tokio::join!(f1, f2);
+        let f3 = tokio::spawn(async move { traced_error_func(3).await });
+        let f4 = tokio::spawn(async move { traced_error_func_single_event(4).await });
+
+        let (r1, r2, r3, r4) = tokio::join!(f1, f2, f3, f4);
+        r1.unwrap();
+        r2.unwrap();
+        r3.unwrap();
+        r4.unwrap();
 
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }

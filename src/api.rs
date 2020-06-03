@@ -1,8 +1,6 @@
 use crate::model::Span;
 use serde::Serialize;
-use std::{
-    collections::HashMap
-};
+use std::collections::HashMap;
 
 fn fill_meta(span: &Span, env: Option<String>) -> HashMap<String, String> {
     let mut meta = HashMap::new();
@@ -78,7 +76,7 @@ mod tests {
 
     use super::*;
     use crate::model::HttpInfo;
-    use chrono::{Utc, Duration};
+    use chrono::{Duration, Utc};
 
     use rand::Rng;
 

@@ -1,5 +1,5 @@
+use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
-use chrono::{Duration, DateTime, Utc};
 
 #[derive(Debug, Clone)]
 pub struct Span {
@@ -23,11 +23,31 @@ pub struct ErrorInfo {
     pub stack: String,
 }
 
+impl Default for ErrorInfo {
+    fn default() -> Self {
+        ErrorInfo {
+            r#type: String::new(),
+            msg: String::new(),
+            stack: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HttpInfo {
     pub url: String,
     pub status_code: String,
     pub method: String,
+}
+
+impl Default for HttpInfo {
+    fn default() -> Self {
+        HttpInfo {
+            url: String::new(),
+            status_code: String::new(),
+            method: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
