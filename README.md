@@ -1,27 +1,51 @@
-# Datadog apm (sync-bsed) for Rust (fork from datadog-apm)
+# Datadog apm (sync-bsed) for Rust (original fork from datadog-apm)
 
 [![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 ![CI](https://github.com/kitsuneninetails/datadog-apm-rust-sync/workflows/CI/badge.svg)
 
-Based on a fork from <https://github.com/pipefy/datadog-apm-rust>.
+Credits
+-------
+Originally based on a fork from <https://github.com/pipefy/datadog-apm-rust>.
 Original code written by Fernando Gonçalves (github: <https://github.com/fhsgoncalves>).
 
-Credit and my gratitude go to the original author for the original code.  This repo only builds on top 
+Credit and my gratitude go to the original author for the original code.  This repo builds on top 
 of his hard work and research.
 
-Changes
--------
 
-As this was a fairly big change to the design and implementation, I decided to make a new repo, rather 
-than a fork, as a PR against the original would be ill-advised, as it changes some basic assumptions and design 
-decisions which I don't feel fair to impose upon the original author (his vision should guide the path the original 
-repo proceeds upon; this repo is just my vision for the original idea he came up with).
+Usage
+------
 
-This tracer has also been extended to become a Logger, allowing logs to be printed out with span and trace IDs.  This
-step also brings it closer to compatibility with rust-tracing and open-telemetry APIs.
+Add to your `Cargo.toml`:
+```toml
+tracing = "0.1"
+tracing-futures = "*"
+datadog-apm-sync = {version = "0.2", git = "http://github.com/kitsuneninetails/datadog-apm-rust-sync"}
+```
 
-Modifications made to use Hyper 0.10 and remove all Tokio/Async+Await functionality:
+In your Rust code, instantiate a DatadogTracer:
 
+```text
+# {
+    let config = Config {
+        service: "service_name".into(),
+        logging_config: Some(LoggingConfig {
+            level: Level::Debug,
+            ..LoggingConfig::default()
+        }),
+        enable_tracing: true,
+        ..Default::default()
+    };
+    let _client = DatadogTracing::new(config);
+#}
+```
+
+Then, just use the tracing library normally (with #[instrument] tags, and span! + span.enter() code) and your data
+will log with trace-id/span-id where applicable (due to the `logging_config` beign passed in; pass in `None` to disable
+the DatadogTracing as a logger) and will prepare datadog traces via the tracing::Subscriber calls (due to `enable_tracing`
+being set; set to `false` to disable the DatadogTracing as a tracing subscriber).
+
+Other Changes from Original
+------
 * Removed tokio crate.  
 * Removed all mention of async/await.
 * Changed MPSC to std::sync version rather than tokio::sync version.
