@@ -460,8 +460,8 @@ impl DatadogTracing {
 fn log_level_to_trace_level(level: log::Level) -> tracing::Level {
     use log::Level::*;
     match level {
-        Error => tracing::Level::ERROR,
-        Warn => tracing::Level::WARN,
+        Error => tracing::Level::INFO,
+        Warn => tracing::Level::INFO,
         Info => tracing::Level::INFO,
         Debug => tracing::Level::DEBUG,
         Trace => tracing::Level::TRACE,
@@ -747,7 +747,7 @@ mod tests {
         let f3 = tokio::spawn(async move { traced_error_func(3).await });
         let f4 = tokio::spawn(async move {
             traced_error_func_single_event(4).await;
-            event!(tracing::Level::INFO, send_trace=true);
+            event!(tracing::Level::INFO, send_trace = true);
         });
 
         let (r1, r2, r3, r4) = tokio::join!(f1, f2, f3, f4);
