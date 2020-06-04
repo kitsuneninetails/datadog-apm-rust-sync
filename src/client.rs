@@ -8,6 +8,7 @@ use serde_json::to_string;
 use std::{
     cell::RefCell,
     collections::{HashMap, LinkedList},
+    str::FromStr,
     sync::{mpsc, Arc, Mutex, RwLock},
 };
 
@@ -177,15 +178,18 @@ impl SpanStorage {
     }
 
     /// End a span and possibly return the drained trace data if it was the last span on the stack
-    fn end_span(&mut self, trace_id: u64) -> Option<Vec<Span>> {
+    fn end_span(&mut self, trace_id: u64) {
         if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
-            if ss.end_span() {
-                Some(ss.drain())
-            } else {
-                None
-            }
+            ss.end_span();
+        }
+    }
+
+    /// Drain the "completed spans" so we can send the trace through to Datadog
+    fn drain_completed(&mut self, trace_id: u64) -> Vec<Span> {
+        if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
+            ss.drain()
         } else {
-            None
+            vec![]
         }
     }
 
@@ -317,6 +321,14 @@ fn trace_server_loop(
                 }
 
                 let mut evt_map: HashMap<String, String> = event.into_iter().collect();
+                if let Some(st) = evt_map.remove("send_trace") {
+                    if bool::from_str(st.as_str()).unwrap_or(false) {
+                        let send_vec = storage.write().unwrap().drain_completed(trace_id);
+                        if !send_vec.is_empty() {
+                            client.send(send_vec);
+                        }
+                    }
+                }
                 let http_evt = to_http_info(
                     evt_map.remove("http_url"),
                     evt_map.remove("http_status_code"),
@@ -342,10 +354,7 @@ fn trace_server_loop(
                     .for_each(|(k, v)| storage.write().unwrap().span_record_tag(trace_id, k, v));
             }
             Ok(TraceCommand::CloseSpan(trace_id)) => {
-                let ret = storage.write().unwrap().end_span(trace_id);
-                if let Some(stack) = ret {
-                    client.send(stack);
-                }
+                storage.write().unwrap().end_span(trace_id);
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 warn!("Tracing channel disconnected, exiting");
@@ -483,6 +492,10 @@ impl EventVisitor {
 
 impl tracing::field::Visit for EventVisitor {
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.fields
+            .push((field.name().to_string(), value.to_string()));
+    }
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
         self.fields
             .push((field.name().to_string(), value.to_string()));
     }
@@ -659,6 +672,7 @@ mod tests {
         debug!("Performing some function for id={}", id);
         debug!("Current trace ID: {}", get_thread_trace_id().unwrap());
         long_call(id).await;
+        event!(tracing::Level::INFO, send_trace = true)
     }
 
     #[tracing::instrument]
@@ -679,7 +693,8 @@ mod tests {
         event!(
             tracing::Level::ERROR,
             custom_tag = "good",
-            custom_tag2 = "test"
+            custom_tag2 = "test",
+            send_trace = true
         );
     }
 
@@ -695,7 +710,8 @@ mod tests {
             http_status_code = "400",
             http_method = "GET",
             custom_tag = "good",
-            custom_tag2 = "test"
+            custom_tag2 = "test",
+            send_trace = true
         );
     }
 
