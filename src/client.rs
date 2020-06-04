@@ -710,8 +710,7 @@ mod tests {
             http_status_code = "400",
             http_method = "GET",
             custom_tag = "good",
-            custom_tag2 = "test",
-            send_trace = true
+            custom_tag2 = "test"
         );
     }
 
@@ -746,7 +745,10 @@ mod tests {
         let f1 = tokio::spawn(async move { traced_func(1).await });
         let f2 = tokio::spawn(async move { traced_func(2).await });
         let f3 = tokio::spawn(async move { traced_error_func(3).await });
-        let f4 = tokio::spawn(async move { traced_error_func_single_event(4).await });
+        let f4 = tokio::spawn(async move {
+            traced_error_func_single_event(4).await;
+            event!(tracing::Level::INFO, send_trace=true);
+        });
 
         let (r1, r2, r3, r4) = tokio::join!(f1, f2, f3, f4);
         r1.unwrap();
