@@ -44,6 +44,14 @@ will log with trace-id/span-id where applicable (due to the `logging_config` bei
 the DatadogTracing as a logger) and will prepare datadog traces via the tracing::Subscriber calls (due to `enable_tracing`
 being set; set to `false` to disable the DatadogTracing as a tracing subscriber).
 
+Use events (event! macro) to send error information (use the keys: error_msg, error_stack, and error_type) or 
+HTTP metdata information (use http_url, http_method, and http_status_code keys).  Also, to actually force through the 
+send to Datadog, send an event:
+
+```text
+event!(tracing::Level::INFO, send_trace=true);
+```
+
 Other Changes from Original
 ------
 * Removed tokio crate.  
