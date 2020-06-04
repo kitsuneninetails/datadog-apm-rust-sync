@@ -464,6 +464,10 @@ thread_local! {
     static CURRENT_SPAN_ID: RefCell<LinkedList<u64>> = RefCell::new(LinkedList::new());
 }
 
+pub fn get_thread_trace_id() -> Option<u64> {
+    TRACE_ID.with(|id| id.borrow().clone())
+}
+
 pub struct EventVisitor {
     fields: Vec<(String, String)>,
 }
@@ -653,6 +657,7 @@ mod tests {
     #[tracing::instrument]
     async fn traced_func(id: u32) {
         debug!("Performing some function for id={}", id);
+        debug!("Current trace ID: {}", get_thread_trace_id().unwrap());
         long_call(id).await;
     }
 
