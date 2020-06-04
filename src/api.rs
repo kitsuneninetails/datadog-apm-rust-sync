@@ -1,9 +1,6 @@
 use crate::model::Span;
 use serde::Serialize;
-use std::{
-    collections::HashMap,
-    time::{Duration, UNIX_EPOCH},
-};
+use std::collections::HashMap;
 
 fn fill_meta(span: &Span, env: Option<String>) -> HashMap<String, String> {
     let mut meta = HashMap::new();
@@ -38,10 +35,6 @@ fn fill_metrics() -> HashMap<String, f64> {
     metrics
 }
 
-fn duration_to_nanos(duration: Duration) -> u64 {
-    duration.as_secs() * 1_000_000_000 + duration.subsec_nanos() as u64
-}
-
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct RawSpan {
     service: String,
@@ -67,8 +60,8 @@ impl RawSpan {
             name: span.name.clone(),
             resource: span.resource.clone(),
             parent_id: span.parent_id,
-            start: duration_to_nanos(span.start.duration_since(UNIX_EPOCH).unwrap()),
-            duration: duration_to_nanos(span.duration),
+            start: span.start.timestamp_nanos() as u64,
+            duration: span.duration.num_nanoseconds().unwrap_or(0) as u64,
             error: if span.error.is_some() { 1 } else { 0 },
             r#type: "custom".to_string(),
             meta: fill_meta(&span, env.clone()),
@@ -83,7 +76,7 @@ mod tests {
 
     use super::*;
     use crate::model::HttpInfo;
-    use std::time::SystemTime;
+    use chrono::{Duration, Utc};
 
     use rand::Rng;
 
@@ -100,8 +93,8 @@ mod tests {
             trace_id: rng.gen::<u64>(),
             name: String::from("request"),
             resource: String::from("/home/v3"),
-            start: SystemTime::now(),
-            duration: Duration::from_secs(2),
+            start: Utc::now(),
+            duration: Duration::seconds(2),
             parent_id: None,
             http: Some(HttpInfo {
                 url: String::from("/home/v3/2?trace=true"),
@@ -132,8 +125,8 @@ mod tests {
             resource: span.resource.clone(),
             service: config.service.clone(),
             r#type: "custom".into(),
-            start: duration_to_nanos(span.start.duration_since(UNIX_EPOCH).unwrap()),
-            duration: duration_to_nanos(span.duration),
+            start: span.start.timestamp_nanos() as u64,
+            duration: span.duration.num_nanoseconds().unwrap_or(0) as u64,
             error: 0,
             meta,
             metrics,

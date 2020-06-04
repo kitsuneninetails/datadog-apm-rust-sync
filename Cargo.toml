@@ -1,6 +1,6 @@
 [package]
 name = "datadog-apm-sync"
-version = "0.1.2"
+version = "0.2.0"
 authors = ["Michael Micucci <9975355+kitsuneninetails@users.noreply.github.com>", "Fernando Gonçalves <fernando.goncalves@pipefy.com> (original base code)"]
 edition = "2018"
 license = "MIT"
@@ -15,6 +15,10 @@ filter-logger = "*"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = "0.2.4"
+tracing-futures = "*"
 
 [dev-dependencies]
 rand = "0.3"
+tokio = { version = "0.2", features = ["rt-core", "sync", "rt-threaded", "macros"] }
