@@ -397,7 +397,12 @@ impl DatadogTracing {
             log::set_max_level(lc.level.to_level_filter());
         }
         if config.enable_tracing {
-            tracing::subscriber::set_global_default(tracer.clone()).unwrap();
+            tracing::subscriber::set_global_default(tracer.clone()).unwrap_or_else(|_| {
+                warn!(
+                    "Global subscriber has already been set!  \
+                           This should only be set once in the executable."
+                )
+            });
         }
         tracer
     }
