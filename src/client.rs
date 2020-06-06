@@ -92,14 +92,16 @@ struct NewSpanData {
 #[derive(Clone, Debug)]
 struct SpanCollection {
     completed_spans: Vec<Span>,
+    parent_span: Span,
     current_spans: VecDeque<Span>,
     entered_spans: VecDeque<u64>,
 }
 
 impl SpanCollection {
-    fn new() -> Self {
+    fn new(parent_span: Span) -> Self {
         SpanCollection {
             completed_spans: vec![],
+            parent_span,
             current_spans: VecDeque::new(),
             entered_spans: VecDeque::new(),
         }
@@ -107,7 +109,11 @@ impl SpanCollection {
 
     // Open a span by inserting the span into the "current" span map by ID.
     fn start_span(&mut self, span: Span) {
-        self.current_spans.push_back(span);
+        let parent_id = Some(self.current_span_id().unwrap_or(self.parent_span.id));
+        self.current_spans.push_back(Span {
+            parent_id,
+            ..span
+        });
         trace!(
             "Start span: {:?}/{:?}",
             self.completed_spans.iter().map(|i| i.id).collect::<Vec<u64>>(),
@@ -180,8 +186,24 @@ impl SpanCollection {
         });
     }
 
-    fn drain(&mut self) -> Vec<Span> {
-        self.completed_spans.drain(..).collect()
+    fn drain_current(mut self) -> Self{
+        self.current_spans.drain(..).collect::<Vec<Span>>().into_iter().for_each(|span| {
+            self.completed_spans.push(Span {
+                duration: Utc::now().signed_duration_since(span.start),
+                ..span
+            })
+        });
+        self
+    }
+
+    fn drain(self) -> Vec<Span> {
+        let parent_span = Span {
+            duration: Utc::now().signed_duration_since(self.parent_span.start.clone()),
+            ..self.parent_span.clone()
+        };
+        let mut ret = self.drain_current().completed_spans.drain(..).collect::<Vec<Span>>();
+        ret.push(parent_span);
+        ret
     }
 }
 
@@ -198,21 +220,25 @@ impl SpanStorage {
 
     // Either start a new trace with the span's trace ID (if there is no span already
     // pushed for that trace ID), or push the span on the "current" stack of spans for that
-    // trace ID.
+    // trace ID.  If "parent" is true, that means we need a parent span pushed for this to
+    // represent the entire trace.
     fn start_span(&mut self, span: Span) {
         let trace_id = span.trace_id;
         if let Some(ss) = self.traces.get_mut(&trace_id) {
-            let parent_id = ss.current_span_id();
-            ss.start_span(Span {
-                parent_id,
-                ..span
-            });
+            ss.start_span(span);
         } else {
-            let mut new_ss = SpanCollection::new();
-            new_ss.start_span(Span {
+
+            let parent_span_id = Utc::now().timestamp_nanos() as u64 + 1;
+            let parent_span = Span {
+                id: parent_span_id,
                 parent_id: None,
-                ..span
-            });
+                name: format!("{}-trace", span.name),
+                ..span.clone()
+            };
+
+            let mut new_ss = SpanCollection::new(parent_span);
+            new_ss.start_span(span);
+
             self.traces.insert(trace_id, new_ss);
         }
     }
@@ -238,9 +264,11 @@ impl SpanStorage {
         }
     }
 
-    /// Drain the "completed spans" so we can send the trace through to Datadog
+    /// Drain the span collection for this trace so we can send the trace through to Datadog,
+    /// This effectively ends the trace.  Any new spans on this trace ID will have the same
+    /// trace ID, but have a new parent span (and a new trace line in Datadog).
     fn drain_completed(&mut self, trace_id: u64) -> Vec<Span> {
-        if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
+        if let Some(ss) = self.traces.remove(&trace_id) {
             ss.drain()
         } else {
             vec![]
@@ -768,6 +796,7 @@ mod tests {
         long_call(id).await;
         event!(
             tracing::Level::ERROR,
+            send_trace = true,
             error_type = "",
             error_msg = "Test error",
             http_url = "http://test.test/",
@@ -806,29 +835,25 @@ mod tests {
         };
         let _client = DatadogTracing::new(config);
 
-        let f1 = tokio::spawn(async move {
-            traced_func(1).await;
-            event!(tracing::Level::INFO, send_trace = true);
-        });
-        let f2 = tokio::spawn(async move {
-            traced_func(2).await;
-            event!(tracing::Level::INFO, send_trace = true);
-        });
+        let f1 = tokio::spawn(async move {traced_func(1).await;});
+        let f2 = tokio::spawn(async move {traced_func(2).await;});
         let f3 = tokio::spawn(async move {
             traced_error_func(3).await;
             event!(tracing::Level::INFO, send_trace = true);
         });
-        let f4 = tokio::spawn(async move {
-            traced_error_func_single_event(4).await;
+        let f4 = tokio::spawn(async move { traced_error_func_single_event(4).await; });
+        let f5 = tokio::spawn(async move {
+            traced_func(5).await;
+            traced_func(6).await;
             event!(tracing::Level::INFO, send_trace = true);
         });
 
-        let (r1, r2, r3, r4) = tokio::join!(f1, f2, f3, f4);
+        let (r1, r2, r3, r4, r5) = tokio::join!(f1, f2, f3, f4, f5);
         r1.unwrap();
         r2.unwrap();
         r3.unwrap();
         r4.unwrap();
-
+        r5.unwrap();
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 }
