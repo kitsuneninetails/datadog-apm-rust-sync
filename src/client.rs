@@ -110,14 +110,17 @@ impl SpanCollection {
     // Open a span by inserting the span into the "current" span map by ID.
     fn start_span(&mut self, span: Span) {
         let parent_id = Some(self.current_span_id().unwrap_or(self.parent_span.id));
-        self.current_spans.push_back(Span {
-            parent_id,
-            ..span
-        });
+        self.current_spans.push_back(Span { parent_id, ..span });
         trace!(
             "Start span: {:?}/{:?}",
-            self.completed_spans.iter().map(|i| i.id).collect::<Vec<u64>>(),
-            self.current_spans.iter().map(|i| i.id).collect::<Vec<u64>>()
+            self.completed_spans
+                .iter()
+                .map(|i| i.id)
+                .collect::<Vec<u64>>(),
+            self.current_spans
+                .iter()
+                .map(|i| i.id)
+                .collect::<Vec<u64>>()
         );
     }
 
@@ -134,11 +137,16 @@ impl SpanCollection {
         }
         trace!(
             "End span: {:?}/{:?}",
-            self.completed_spans.iter().map(|i| i.id).collect::<Vec<u64>>(),
-            self.current_spans.iter().map(|i| i.id).collect::<Vec<u64>>()
+            self.completed_spans
+                .iter()
+                .map(|i| i.id)
+                .collect::<Vec<u64>>(),
+            self.current_spans
+                .iter()
+                .map(|i| i.id)
+                .collect::<Vec<u64>>()
         );
     }
-
 
     // Enter a span (mark it on stack)
     fn enter_span(&mut self, span_id: u64) {
@@ -186,13 +194,17 @@ impl SpanCollection {
         });
     }
 
-    fn drain_current(mut self) -> Self{
-        self.current_spans.drain(..).collect::<Vec<Span>>().into_iter().for_each(|span| {
-            self.completed_spans.push(Span {
-                duration: Utc::now().signed_duration_since(span.start),
-                ..span
-            })
-        });
+    fn drain_current(mut self) -> Self {
+        self.current_spans
+            .drain(..)
+            .collect::<Vec<Span>>()
+            .into_iter()
+            .for_each(|span| {
+                self.completed_spans.push(Span {
+                    duration: Utc::now().signed_duration_since(span.start),
+                    ..span
+                })
+            });
         self
     }
 
@@ -201,7 +213,11 @@ impl SpanCollection {
             duration: Utc::now().signed_duration_since(self.parent_span.start.clone()),
             ..self.parent_span.clone()
         };
-        let mut ret = self.drain_current().completed_spans.drain(..).collect::<Vec<Span>>();
+        let mut ret = self
+            .drain_current()
+            .completed_spans
+            .drain(..)
+            .collect::<Vec<Span>>();
         ret.push(parent_span);
         ret
     }
@@ -227,7 +243,6 @@ impl SpanStorage {
         if let Some(ss) = self.traces.get_mut(&trace_id) {
             ss.start_span(span);
         } else {
-
             let parent_span_id = Utc::now().timestamp_nanos() as u64 + 1;
             let parent_span = Span {
                 id: parent_span_id,
@@ -333,10 +348,13 @@ fn trace_server_loop(
                         .next()
                         .is_some();
                     if !skip && !body_skip {
-                        match record.trace_id
-                            .and_then(|tr| storage.read().unwrap().current_span_id(tr)
+                        match record.trace_id.and_then(|tr| {
+                            storage
+                                .read()
+                                .unwrap()
+                                .current_span_id(tr)
                                 .map(|sp| (tr, sp))
-                            ) {
+                        }) {
                             Some((tr, sp)) => {
                                 println!(
                                     "{time} {level} [trace-id:{traceid} span-id:{spanid}] [{module}] {body}",
@@ -347,7 +365,7 @@ fn trace_server_loop(
                                     module = record.module.unwrap_or("-".to_string()),
                                     body = record.msg_str
                                 );
-                            },
+                            }
                             _ => {
                                 println!(
                                     "{time} {level} [{module}] {body}",
@@ -677,7 +695,8 @@ impl tracing::Subscriber for DatadogTracing {
     fn try_close(&self, span: tracing::span::Id) -> bool {
         TRACE_ID.with(|tr| {
             if let Some(ref trace_id) = *tr.borrow() {
-                self.send_close_span(*trace_id, span.into_u64()).unwrap_or(());
+                self.send_close_span(*trace_id, span.into_u64())
+                    .unwrap_or(());
             }
         });
         false
@@ -699,11 +718,11 @@ impl Log for DatadogTracing {
                 let now = chrono::Utc::now();
                 let msg_str = format!("{}", record.args());
                 let log_rec = TRACE_ID.with(|tr| LogRecord {
-                        trace_id: tr.borrow().clone(),
-                        level: record.level(),
-                        time: now,
-                        module: record.module_path().map(|s| s.to_string()),
-                        msg_str,
+                    trace_id: tr.borrow().clone(),
+                    level: record.level(),
+                    time: now,
+                    module: record.module_path().map(|s| s.to_string()),
+                    msg_str,
                 });
                 self.send_log(log_rec).unwrap_or_else(|_| ());
             }
@@ -835,13 +854,19 @@ mod tests {
         };
         let _client = DatadogTracing::new(config);
 
-        let f1 = tokio::spawn(async move {traced_func(1).await;});
-        let f2 = tokio::spawn(async move {traced_func(2).await;});
+        let f1 = tokio::spawn(async move {
+            traced_func(1).await;
+        });
+        let f2 = tokio::spawn(async move {
+            traced_func(2).await;
+        });
         let f3 = tokio::spawn(async move {
             traced_error_func(3).await;
             event!(tracing::Level::INFO, send_trace = true);
         });
-        let f4 = tokio::spawn(async move { traced_error_func_single_event(4).await; });
+        let f4 = tokio::spawn(async move {
+            traced_error_func_single_event(4).await;
+        });
         let f5 = tokio::spawn(async move {
             traced_func(5).await;
             traced_func(6).await;
