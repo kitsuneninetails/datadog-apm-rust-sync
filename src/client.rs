@@ -232,7 +232,7 @@ impl SpanStorage {
             let parent_span = Span {
                 id: parent_span_id,
                 parent_id: None,
-                name: format!("{}-trace", span.name),
+                name: format!("{}-traceparent", span.trace_id),
                 ..span.clone()
             };
 
