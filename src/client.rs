@@ -110,14 +110,17 @@ impl SpanCollection {
     // Open a span by inserting the span into the "current" span map by ID.
     fn start_span(&mut self, span: Span) {
         let parent_id = Some(self.current_span_id().unwrap_or(self.parent_span.id));
-        self.current_spans.push_back(Span {
-            parent_id,
-            ..span
-        });
+        self.current_spans.push_back(Span { parent_id, ..span });
         trace!(
             "Start span: {:?}/{:?}",
-            self.completed_spans.iter().map(|i| i.id).collect::<Vec<u64>>(),
-            self.current_spans.iter().map(|i| i.id).collect::<Vec<u64>>()
+            self.completed_spans
+                .iter()
+                .map(|i| i.id)
+                .collect::<Vec<u64>>(),
+            self.current_spans
+                .iter()
+                .map(|i| i.id)
+                .collect::<Vec<u64>>()
         );
     }
 
@@ -134,11 +137,16 @@ impl SpanCollection {
         }
         trace!(
             "End span: {:?}/{:?}",
-            self.completed_spans.iter().map(|i| i.id).collect::<Vec<u64>>(),
-            self.current_spans.iter().map(|i| i.id).collect::<Vec<u64>>()
+            self.completed_spans
+                .iter()
+                .map(|i| i.id)
+                .collect::<Vec<u64>>(),
+            self.current_spans
+                .iter()
+                .map(|i| i.id)
+                .collect::<Vec<u64>>()
         );
     }
-
 
     // Enter a span (mark it on stack)
     fn enter_span(&mut self, span_id: u64) {
@@ -186,13 +194,17 @@ impl SpanCollection {
         });
     }
 
-    fn drain_current(mut self) -> Self{
-        self.current_spans.drain(..).collect::<Vec<Span>>().into_iter().for_each(|span| {
-            self.completed_spans.push(Span {
-                duration: Utc::now().signed_duration_since(span.start),
-                ..span
-            })
-        });
+    fn drain_current(mut self) -> Self {
+        self.current_spans
+            .drain(..)
+            .collect::<Vec<Span>>()
+            .into_iter()
+            .for_each(|span| {
+                self.completed_spans.push(Span {
+                    duration: Utc::now().signed_duration_since(span.start),
+                    ..span
+                })
+            });
         self
     }
 
@@ -201,7 +213,11 @@ impl SpanCollection {
             duration: Utc::now().signed_duration_since(self.parent_span.start.clone()),
             ..self.parent_span.clone()
         };
-        let mut ret = self.drain_current().completed_spans.drain(..).collect::<Vec<Span>>();
+        let mut ret = self
+            .drain_current()
+            .completed_spans
+            .drain(..)
+            .collect::<Vec<Span>>();
         ret.push(parent_span);
         ret
     }
@@ -227,7 +243,6 @@ impl SpanStorage {
         if let Some(ss) = self.traces.get_mut(&trace_id) {
             ss.start_span(span);
         } else {
-
             let parent_span_id = Utc::now().timestamp_nanos() as u64 + 1;
             let parent_span = Span {
                 id: parent_span_id,
@@ -333,10 +348,13 @@ fn trace_server_loop(
                         .next()
                         .is_some();
                     if !skip && !body_skip {
-                        match record.trace_id
-                            .and_then(|tr| storage.read().unwrap().current_span_id(tr)
+                        match record.trace_id.and_then(|tr| {
+                            storage
+                                .read()
+                                .unwrap()
+                                .current_span_id(tr)
                                 .map(|sp| (tr, sp))
-                            ) {
+                        }) {
                             Some((tr, sp)) => {
                                 println!(
                                     "{time} {level} [trace-id:{traceid} span-id:{spanid}] [{module}] {body}",
@@ -347,7 +365,7 @@ fn trace_server_loop(
                                     module = record.module.unwrap_or("-".to_string()),
                                     body = record.msg_str
                                 );
-                            },
+                            }
                             _ => {
                                 println!(
                                     "{time} {level} [{module}] {body}",
@@ -577,7 +595,7 @@ thread_local! {
     static TRACE_ID: RefCell<u64> = RefCell::new(Utc::now().timestamp_nanos() as u64);
 }
 
-pub fn new_trace_id() -> u64{
+pub fn new_trace_id() -> u64 {
     TRACE_ID.with(|tr| match tr.try_borrow_mut() {
         Ok(mut tr_id) => {
             let new_trace_id = Utc::now().timestamp_nanos() as u64;
@@ -671,7 +689,8 @@ impl tracing::Subscriber for DatadogTracing {
         let mut new_evt_visitor = EventVisitor::new();
         event.record(&mut new_evt_visitor);
         let trace_id = get_thread_trace_id();
-        self.send_event(trace_id, new_evt_visitor.fields).unwrap_or(());
+        self.send_event(trace_id, new_evt_visitor.fields)
+            .unwrap_or(());
         if new_evt_visitor.new_event {
             new_trace_id();
         }
@@ -679,17 +698,20 @@ impl tracing::Subscriber for DatadogTracing {
 
     fn enter(&self, span: &tracing::span::Id) {
         let trace_id = get_thread_trace_id();
-        self.send_enter_span(trace_id, span.clone().into_u64()).unwrap_or(());
+        self.send_enter_span(trace_id, span.clone().into_u64())
+            .unwrap_or(());
     }
 
     fn exit(&self, span: &tracing::span::Id) {
         let trace_id = get_thread_trace_id();
-        self.send_exit_span(trace_id, span.clone().into_u64()).unwrap_or(());
+        self.send_exit_span(trace_id, span.clone().into_u64())
+            .unwrap_or(());
     }
 
     fn try_close(&self, span: tracing::span::Id) -> bool {
         let trace_id = get_thread_trace_id();
-        self.send_close_span(trace_id, span.into_u64()).unwrap_or(());
+        self.send_close_span(trace_id, span.into_u64())
+            .unwrap_or(());
         false
     }
 }
