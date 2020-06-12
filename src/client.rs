@@ -327,7 +327,7 @@ fn trace_server_loop(
     loop {
         let client = client.clone();
 
-        match buffer_receiver.try_recv() {
+        match buffer_receiver.recv() {
             Ok(TraceCommand::Log(record)) => {
                 if let Some(ref lc) = log_config {
                     let skip = record
@@ -474,11 +474,10 @@ fn trace_server_loop(
                 trace!("CLOSE SPAN: {}/{}", trace_id, span_id);
                 storage.write().unwrap().end_span(trace_id, span_id);
             }
-            Err(mpsc::TryRecvError::Disconnected) => {
+            Err(_) => {
                 warn!("Tracing channel disconnected, exiting");
                 return;
             }
-            Err(_) => {}
         }
     }
 }
