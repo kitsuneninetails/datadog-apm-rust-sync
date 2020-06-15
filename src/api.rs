@@ -1,6 +1,13 @@
-use crate::model::Span;
+use crate::{client::ApmConfig, model::Span};
 use serde::Serialize;
 use std::collections::HashMap;
+
+const SAMPLING_PRIORITY_KEY: &'static str = "_sampling_priority_v1";
+const ANALYTICS_SAMPLE_RATE_KEY: &'static str = "_dd1.sr.eausr";
+const _SAMPLE_RATE_METRIC_KEY: &'static str = "_sample_rate";
+const _SAMPLING_AGENT_DECISION: &'static str = "_dd.agent_psr";
+const _SAMPLING_RULE_DECISION: &'static str = "_dd.rule_psr";
+const _SAMPLING_LIMIT_DECISION: &'static str = "_dd.limit_psr";
 
 fn fill_meta(span: &Span, env: Option<String>) -> HashMap<String, String> {
     let mut meta = HashMap::new();
@@ -29,9 +36,18 @@ fn fill_meta(span: &Span, env: Option<String>) -> HashMap<String, String> {
     meta
 }
 
-fn fill_metrics() -> HashMap<String, f64> {
+fn fill_metrics(apm_config: &ApmConfig) -> HashMap<String, f64> {
     let mut metrics = HashMap::new();
-    metrics.insert("_sampling_priority_v1".to_string(), f64::from(1));
+    if apm_config.apm_enabled {
+        metrics.insert(
+            SAMPLING_PRIORITY_KEY.to_string(),
+            apm_config.sample_priority,
+        );
+        metrics.insert(
+            ANALYTICS_SAMPLE_RATE_KEY.to_string(),
+            apm_config.sample_rate,
+        );
+    }
     metrics
 }
 
@@ -52,7 +68,12 @@ pub struct RawSpan {
 }
 
 impl RawSpan {
-    pub fn from_span(span: &Span, service: &String, env: &Option<String>) -> RawSpan {
+    pub fn from_span(
+        span: &Span,
+        service: &String,
+        env: &Option<String>,
+        cfg: &ApmConfig,
+    ) -> RawSpan {
         RawSpan {
             service: service.clone(),
             trace_id: span.trace_id,
@@ -65,7 +86,7 @@ impl RawSpan {
             error: if span.error.is_some() { 1 } else { 0 },
             r#type: "custom".to_string(),
             meta: fill_meta(&span, env.clone()),
-            metrics: fill_metrics(),
+            metrics: fill_metrics(cfg),
         }
     }
 }
@@ -85,7 +106,12 @@ mod tests {
         let config = Config {
             service: String::from("service_name"),
             env: Some(String::from("staging")),
-            ..Default::default()
+            apm_config: ApmConfig {
+                apm_enabled: true,
+                sample_priority: 1f64,
+                sample_rate: 1f64,
+            },
+            ..Config::default()
         };
         let mut rng = rand::thread_rng();
         let span = Span {
@@ -116,6 +142,7 @@ mod tests {
 
         let mut metrics = HashMap::new();
         metrics.insert("_sampling_priority_v1".to_string(), f64::from(1));
+        metrics.insert("_dd1.sr.eausr".to_string(), f64::from(1));
 
         let expected = RawSpan {
             trace_id: span.trace_id,
@@ -131,7 +158,7 @@ mod tests {
             meta,
             metrics,
         };
-        let raw_span = RawSpan::from_span(&span, &config.service, &config.env);
+        let raw_span = RawSpan::from_span(&span, &config.service, &config.env, &config.apm_config);
 
         assert_eq!(raw_span, expected);
     }

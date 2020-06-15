@@ -5,6 +5,6 @@ pub mod client;
 pub mod model;
 
 pub use crate::{
-    client::{get_thread_trace_id, Config, DatadogTracing, LoggingConfig},
+    client::{get_thread_id, Config, DatadogTracing, LoggingConfig},
     model::{ErrorInfo, HttpInfo, Span, SqlInfo},
 };
