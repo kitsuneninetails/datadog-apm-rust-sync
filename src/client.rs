@@ -7,7 +7,6 @@ use log::{error, trace, warn, Level as LogLevel, Log, Record};
 use serde_json::to_string;
 use std::{
     collections::{HashMap, VecDeque},
-    str::FromStr,
     sync::{mpsc, Arc, Mutex, RwLock},
 };
 
@@ -100,7 +99,7 @@ enum TraceCommand {
     Enter(TimeInNanos, ThreadId, SpanId),
     Exit(TimeInNanos, SpanId),
     CloseSpan(TimeInNanos, SpanId),
-    Event(TimeInNanos, Vec<(String, String)>),
+    Event(TimeInNanos, ThreadId, HashMap<String, String>),
 }
 
 #[derive(Debug, Clone)]
@@ -472,37 +471,37 @@ fn trace_server_loop(
                 trace!("EXIT SPAN: {}", span_id);
                 storage.write().unwrap().exit_span(span_id);
             }
-            Ok(TraceCommand::Event(_nanos, event)) => {
+            Ok(TraceCommand::Event(_nanos, thread_id, mut event)) => {
                 trace!("EVENT: {:?}", event);
                 // Events are only valid if the trace_id flag is set
-                let mut evt_map: HashMap<String, String> = event.into_iter().collect();
-                if let Some(trace_id) = evt_map
-                    .remove("trace_id")
-                    .and_then(|tr| tr.parse::<u64>().ok())
+                // Send trace specified the trace to send, so use that instead of the thread's
+                // current trace.
+                if let Some(send_trace_id) = event
+                    .remove("send_trace")
+                    .and_then(|t| t.parse::<u64>().ok())
                 {
-                    if evt_map
-                        .remove("send_trace")
-                        .and_then(|s| bool::from_str(s.as_str()).ok())
-                        .unwrap_or(false)
-                    {
-                        let send_vec = storage.write().unwrap().drain_completed(trace_id);
-                        // Thread has ended this trace.  Until it enters a new span, it
-                        // is not in a trace.
-                        storage.write().unwrap().remove_current_trace(trace_id);
-                        if !send_vec.is_empty() {
-                            client.send(send_vec);
-                        }
+                    let send_vec = storage.write().unwrap().drain_completed(send_trace_id);
+                    // Thread has ended this trace.  Until it enters a new span, it
+                    // is not in a trace.
+                    storage.write().unwrap().remove_current_trace(send_trace_id);
+                    if !send_vec.is_empty() {
+                        client.send(send_vec);
                     }
+                }
+                // Tag events only work inside a trace, so get the trace from the thread.
+                // No trace means no tagging.
+                let trace_id_opt = storage.read().unwrap().get_trace_id_for_thread(thread_id);
+                if let Some(trace_id) = trace_id_opt {
                     let http_evt = to_http_info(
-                        evt_map.remove("http_url"),
-                        evt_map.remove("http_status_code"),
-                        evt_map.remove("http_method"),
+                        event.remove("http_url"),
+                        event.remove("http_status_code"),
+                        event.remove("http_method"),
                     );
 
                     let err_evt = to_error_info(
-                        evt_map.remove("error_msg"),
-                        evt_map.remove("error_type"),
-                        evt_map.remove("error_stack"),
+                        event.remove("error_msg"),
+                        event.remove("error_type"),
+                        event.remove("error_stack"),
                     );
 
                     if let Some(h) = http_evt {
@@ -513,7 +512,7 @@ fn trace_server_loop(
                         storage.write().unwrap().span_record_error(trace_id, e)
                     }
 
-                    evt_map.into_iter().for_each(|(k, v)| {
+                    event.into_iter().for_each(|(k, v)| {
                         storage.write().unwrap().span_record_tag(trace_id, k, v)
                     });
                 }
@@ -618,11 +617,16 @@ impl DatadogTracing {
             .map_err(|_| ())
     }
 
-    fn send_event(&self, nanos: u64, event: Vec<(String, String)>) -> Result<(), ()> {
+    fn send_event(
+        &self,
+        nanos: u64,
+        thread_id: u64,
+        event: HashMap<String, String>,
+    ) -> Result<(), ()> {
         self.buffer_sender
             .lock()
             .unwrap()
-            .send(TraceCommand::Event(nanos, event))
+            .send(TraceCommand::Event(nanos, thread_id, event))
             .map(|_| ())
             .map_err(|_| ())
     }
@@ -647,51 +651,34 @@ pub fn get_thread_id() -> u64 {
     THREAD_ID.with(|id| *id)
 }
 
-pub struct SearchVisitor {
-    fields: Vec<(String, String)>,
-    pub value: Option<String>,
-    search: &'static str,
+pub struct HashMapVisitor {
+    fields: HashMap<String, String>,
 }
 
-impl SearchVisitor {
-    fn new(search: &'static str) -> Self {
+impl HashMapVisitor {
+    fn new() -> Self {
         // Event/Span vectors should never have more than ten fields.
-        SearchVisitor {
-            fields: Vec::with_capacity(10),
-            value: None,
-            search,
+        HashMapVisitor {
+            fields: HashMap::new(),
         }
+    }
+    fn add_value(&mut self, field: &tracing::field::Field, value: String) {
+        self.fields.insert(field.name().to_string(), value);
     }
 }
 
-impl tracing::field::Visit for SearchVisitor {
+impl tracing::field::Visit for HashMapVisitor {
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        if field.name() == self.search {
-            self.value = Some(value.to_string());
-        }
-        self.fields
-            .push((field.name().to_string(), value.to_string()));
+        self.add_value(field, format!("{}", value));
     }
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
-        if field.name() == self.search {
-            self.value = Some(value.to_string());
-        }
-        self.fields
-            .push((field.name().to_string(), value.to_string()));
+        self.add_value(field, format!("{}", value));
     }
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-        if field.name() == self.search {
-            self.value = Some(value.to_string());
-        }
-        self.fields
-            .push((field.name().to_string(), value.to_string()));
+        self.add_value(field, format!("{}", value));
     }
     fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
-        if field.name() == self.search {
-            self.value = Some(value.to_string());
-        }
-        self.fields
-            .push((field.name().to_string(), value.to_string()));
+        self.add_value(field, format!("{}", value));
     }
     fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {
         // Do nothing
@@ -708,10 +695,11 @@ impl tracing::Subscriber for DatadogTracing {
 
     fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
         let nanos = Utc::now().timestamp_nanos() as u64;
-        let mut new_span_visitor = SearchVisitor::new("trace_id");
+        let mut new_span_visitor = HashMapVisitor::new();
         span.record(&mut new_span_visitor);
         let trace_id = new_span_visitor
-            .value
+            .fields
+            .remove("trace_id")
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(Utc::now().timestamp_nanos() as u64);
         let span_id = Utc::now().timestamp_nanos() as u64 + 1;
@@ -732,9 +720,13 @@ impl tracing::Subscriber for DatadogTracing {
 
     fn event(&self, event: &tracing::Event<'_>) {
         let nanos = Utc::now().timestamp_nanos() as u64;
-        let mut new_evt_visitor = SearchVisitor::new("send_trace");
+        let thread_id = get_thread_id();
+        let mut new_evt_visitor = HashMapVisitor::new();
         event.record(&mut new_evt_visitor);
-        self.send_event(nanos, new_evt_visitor.fields).unwrap_or(());
+        trace!("Event push: {:?}", new_evt_visitor.fields);
+
+        self.send_event(nanos, thread_id, new_evt_visitor.fields)
+            .unwrap_or(());
     }
 
     fn enter(&self, span: &tracing::span::Id) {
@@ -878,23 +870,20 @@ mod tests {
         long_call(trace_id).await;
         event!(
             tracing::Level::ERROR,
-            trace_id = trace_id,
             error_type = "",
             error_msg = "Test error"
         );
         event!(
             tracing::Level::ERROR,
-            trace_id = trace_id,
             http_url = "http://test.test/",
             http_status_code = "400",
             http_method = "GET"
         );
         event!(
             tracing::Level::ERROR,
-            trace_id = trace_id,
             custom_tag = "good",
             custom_tag2 = "test",
-            send_trace = true
+            send_trace = trace_id
         );
     }
 
@@ -910,8 +899,7 @@ mod tests {
         long_call(trace_id).await;
         event!(
             tracing::Level::ERROR,
-            trace_id = trace_id,
-            send_trace = true,
+            send_trace = trace_id,
             error_type = "",
             error_msg = "Test error",
             http_url = "http://test.test/",
@@ -927,7 +915,7 @@ mod tests {
             service: String::from("datadog_apm_test"),
             env: Some("staging-01".into()),
             logging_config: Some(LoggingConfig {
-                level: Level::Debug,
+                level: Level::Trace,
                 mod_filter: vec!["hyper", "mime"],
                 ..LoggingConfig::default()
             }),
@@ -943,7 +931,7 @@ mod tests {
         trace_config();
         let f1 = tokio::spawn(async move {
             traced_func_no_send(trace_id).await;
-            event!(tracing::Level::INFO, trace_id = trace_id, send_trace = true);
+            event!(tracing::Level::INFO, send_trace = trace_id);
         });
 
         f1.await.unwrap();
@@ -957,19 +945,11 @@ mod tests {
         trace_config();
         let f1 = tokio::spawn(async move {
             traced_func_no_send(trace_id1).await;
-            event!(
-                tracing::Level::INFO,
-                trace_id = trace_id1,
-                send_trace = true
-            );
+            event!(tracing::Level::INFO, send_trace = trace_id1);
         });
         let f2 = tokio::spawn(async move {
             traced_func_no_send(trace_id2).await;
-            event!(
-                tracing::Level::INFO,
-                trace_id = trace_id2,
-                send_trace = true
-            );
+            event!(tracing::Level::INFO, send_trace = trace_id2);
         });
 
         let (r1, r2) = tokio::join!(f1, f2);
@@ -1001,83 +981,43 @@ mod tests {
         rt.block_on(async move {
             let f1 = tokio::spawn(async move {
                 traced_func_no_send(trace_id1).await;
-                event!(
-                    tracing::Level::INFO,
-                    trace_id = trace_id1,
-                    send_trace = true
-                );
+                event!(tracing::Level::INFO, send_trace = trace_id1);
             });
             let f2 = tokio::spawn(async move {
                 traced_func_no_send(trace_id2).await;
-                event!(
-                    tracing::Level::INFO,
-                    trace_id = trace_id2,
-                    send_trace = true
-                );
+                event!(tracing::Level::INFO, send_trace = trace_id2);
             });
             let f3 = tokio::spawn(async move {
                 traced_func_no_send(trace_id3).await;
-                event!(
-                    tracing::Level::INFO,
-                    trace_id = trace_id3,
-                    send_trace = true
-                );
+                event!(tracing::Level::INFO, send_trace = trace_id3);
             });
             let f4 = tokio::spawn(async move {
                 traced_func_no_send(trace_id4).await;
-                event!(
-                    tracing::Level::INFO,
-                    trace_id = trace_id4,
-                    send_trace = true
-                );
+                event!(tracing::Level::INFO, send_trace = trace_id4);
             });
             let f5 = tokio::spawn(async move {
                 traced_func_no_send(trace_id5).await;
-                event!(
-                    tracing::Level::INFO,
-                    trace_id = trace_id5,
-                    send_trace = true
-                );
+                event!(tracing::Level::INFO, send_trace = trace_id5);
             });
             let f6 = tokio::spawn(async move {
                 traced_func_no_send(trace_id6).await;
-                event!(
-                    tracing::Level::INFO,
-                    trace_id = trace_id6,
-                    send_trace = true
-                );
+                event!(tracing::Level::INFO, send_trace = trace_id6);
             });
             let f7 = tokio::spawn(async move {
                 traced_func_no_send(trace_id7).await;
-                event!(
-                    tracing::Level::INFO,
-                    trace_id = trace_id7,
-                    send_trace = true
-                );
+                event!(tracing::Level::INFO, send_trace = trace_id7);
             });
             let f8 = tokio::spawn(async move {
                 traced_func_no_send(trace_id8).await;
-                event!(
-                    tracing::Level::INFO,
-                    trace_id = trace_id8,
-                    send_trace = true
-                );
+                event!(tracing::Level::INFO, send_trace = trace_id8);
             });
             let f9 = tokio::spawn(async move {
                 traced_func_no_send(trace_id9).await;
-                event!(
-                    tracing::Level::INFO,
-                    trace_id = trace_id9,
-                    send_trace = true
-                );
+                event!(tracing::Level::INFO, send_trace = trace_id9);
             });
             let f10 = tokio::spawn(async move {
                 traced_func_no_send(trace_id10).await;
-                event!(
-                    tracing::Level::INFO,
-                    trace_id = trace_id10,
-                    send_trace = true
-                );
+                event!(tracing::Level::INFO, send_trace = trace_id10);
             });
             let (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10) =
                 tokio::join!(f1, f2, f3, f4, f5, f6, f7, f8, f9, f10);
@@ -1126,7 +1066,7 @@ mod tests {
             traced_func_no_send(trace_id).await;
             traced_func_no_send(trace_id).await;
             // Send both funcs under one parent span and one trace
-            event!(tracing::Level::INFO, trace_id = trace_id, send_trace = true);
+            event!(tracing::Level::INFO, send_trace = trace_id);
         });
         f5.await.unwrap();
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
@@ -1139,18 +1079,10 @@ mod tests {
         trace_config();
         let f7 = tokio::spawn(async move {
             traced_func_no_send(trace_id1).await;
-            event!(
-                tracing::Level::INFO,
-                trace_id = trace_id1,
-                send_trace = true
-            );
+            event!(tracing::Level::INFO, send_trace = trace_id1);
 
             traced_func_no_send(trace_id2).await;
-            event!(
-                tracing::Level::INFO,
-                trace_id = trace_id2,
-                send_trace = true
-            );
+            event!(tracing::Level::INFO, send_trace = trace_id2);
         });
         f7.await.unwrap();
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
