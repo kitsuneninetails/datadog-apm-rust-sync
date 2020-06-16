@@ -723,7 +723,6 @@ impl tracing::Subscriber for DatadogTracing {
         let thread_id = get_thread_id();
         let mut new_evt_visitor = HashMapVisitor::new();
         event.record(&mut new_evt_visitor);
-        trace!("Event push: {:?}", new_evt_visitor.fields);
 
         self.send_event(nanos, thread_id, new_evt_visitor.fields)
             .unwrap_or(());
