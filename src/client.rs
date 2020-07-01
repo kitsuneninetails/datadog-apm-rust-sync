@@ -1,13 +1,17 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use hyper::method::Method;
 
 use crate::{api::RawSpan, model::Span};
 use hyper::header::{ContentLength, Headers};
+use lazy_static::lazy_static;
 use log::{error, trace, warn, Level as LogLevel, Log, Record};
 use serde_json::to_string;
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{mpsc, Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicU16, AtomicU32, Ordering},
+        mpsc, Arc, Mutex, RwLock,
+    },
 };
 
 /// Configuration settings for the client.
@@ -79,18 +83,19 @@ impl Default for ApmConfig {
     }
 }
 
+type TimeInNanos = u64;
+type ThreadId = u32;
+type TraceId = u64;
+type SpanId = u64;
+
 #[derive(Clone, Debug)]
 struct LogRecord {
-    pub thread_id: u64,
+    pub thread_id: ThreadId,
     pub level: log::Level,
     pub time: DateTime<Utc>,
     pub msg_str: String,
     pub module: Option<String>,
 }
-
-type TimeInNanos = u64;
-type ThreadId = u64;
-type SpanId = u64;
 
 #[derive(Clone, Debug)]
 enum TraceCommand {
@@ -99,13 +104,18 @@ enum TraceCommand {
     Enter(TimeInNanos, ThreadId, SpanId),
     Exit(TimeInNanos, SpanId),
     CloseSpan(TimeInNanos, SpanId),
-    Event(TimeInNanos, ThreadId, HashMap<String, String>),
+    Event(
+        TimeInNanos,
+        ThreadId,
+        HashMap<String, String>,
+        DateTime<Utc>,
+    ),
 }
 
 #[derive(Debug, Clone)]
 struct NewSpanData {
-    pub trace_id: u64,
-    pub id: u64,
+    pub trace_id: TraceId,
+    pub id: SpanId,
     pub name: String,
     pub resource: String,
     pub start: DateTime<Utc>,
@@ -136,7 +146,7 @@ impl SpanCollection {
     }
 
     // Move span to "completed" based on ID.
-    fn end_span(&mut self, nanos: u64, span_id: u64) {
+    fn end_span(&mut self, nanos: u64, span_id: SpanId) {
         let pos = self.current_spans.iter().rposition(|i| i.id == span_id);
         if let Some(i) = pos {
             self.current_spans.remove(i).map(|span| {
@@ -149,12 +159,12 @@ impl SpanCollection {
     }
 
     // Enter a span (mark it on stack)
-    fn enter_span(&mut self, span_id: u64) {
+    fn enter_span(&mut self, span_id: SpanId) {
         self.entered_spans.push_back(span_id);
     }
 
     // Exit a span (pop from stack)
-    fn exit_span(&mut self, span_id: u64) {
+    fn exit_span(&mut self, span_id: SpanId) {
         let pos = self.entered_spans.iter().rposition(|i| *i == span_id);
         if let Some(i) = pos {
             self.entered_spans.remove(i);
@@ -206,9 +216,9 @@ impl SpanCollection {
         self
     }
 
-    fn drain(self) -> Vec<Span> {
+    fn drain(self, end_time: DateTime<Utc>) -> Vec<Span> {
         let parent_span = Span {
-            duration: Utc::now().signed_duration_since(self.parent_span.start.clone()),
+            duration: end_time.signed_duration_since(self.parent_span.start.clone()),
             ..self.parent_span.clone()
         };
         let mut ret = self
@@ -222,10 +232,10 @@ impl SpanCollection {
 }
 
 struct SpanStorage {
-    traces: HashMap<u64, SpanCollection>,
-    spans_to_trace_id: HashMap<u64, u64>,
-    current_trace_for_thread: HashMap<u64, u64>,
-    current_thread_for_trace: HashMap<u64, u64>,
+    traces: HashMap<TraceId, SpanCollection>,
+    spans_to_trace_id: HashMap<SpanId, TraceId>,
+    current_trace_for_thread: HashMap<ThreadId, TraceId>,
+    current_thread_for_trace: HashMap<TraceId, ThreadId>,
 }
 
 impl SpanStorage {
@@ -264,7 +274,7 @@ impl SpanStorage {
     }
 
     /// End a span and update the current "top of the stack"
-    fn end_span(&mut self, nanos: u64, span_id: u64) {
+    fn end_span(&mut self, nanos: u64, span_id: SpanId) {
         if let Some(trace_id) = self.spans_to_trace_id.get(&span_id) {
             if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
                 ss.end_span(nanos, span_id);
@@ -274,7 +284,7 @@ impl SpanStorage {
 
     /// Enter a span for trace, and keep track so that new spans get the correct parent.
     /// Keep track of which trace the current thread is in (for logging and events)
-    fn enter_span(&mut self, thread_id: u64, span_id: u64) {
+    fn enter_span(&mut self, thread_id: ThreadId, span_id: SpanId) {
         let t_id = self.spans_to_trace_id.get(&span_id).map(|i| *i);
         if let Some(trace_id) = t_id {
             if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
@@ -285,7 +295,7 @@ impl SpanStorage {
     }
 
     /// Exit a span for trace, and keep track so that new spans get the correct parent
-    fn exit_span(&mut self, span_id: u64) {
+    fn exit_span(&mut self, span_id: SpanId) {
         if let Some(trace_id) = self.spans_to_trace_id.get(&span_id) {
             if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
                 ss.exit_span(span_id);
@@ -296,45 +306,45 @@ impl SpanStorage {
     /// Drain the span collection for this trace so we can send the trace through to Datadog,
     /// This effectively ends the trace.  Any new spans on this trace ID will have the same
     /// trace ID, but have a new parent span (and a new trace line in Datadog).
-    fn drain_completed(&mut self, trace_id: u64) -> Vec<Span> {
+    fn drain_completed(&mut self, trace_id: TraceId, end: DateTime<Utc>) -> Vec<Span> {
         if let Some(ss) = self.traces.remove(&trace_id) {
-            ss.drain()
+            ss.drain(end)
         } else {
             vec![]
         }
     }
 
     /// Record an error event on a span
-    fn span_record_error(&mut self, trace_id: u64, error: crate::model::ErrorInfo) {
+    fn span_record_error(&mut self, trace_id: TraceId, error: crate::model::ErrorInfo) {
         if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
             ss.err_span(error)
         }
     }
 
     /// Record HTTP info onto a span
-    fn span_record_http(&mut self, trace_id: u64, http: crate::model::HttpInfo) {
+    fn span_record_http(&mut self, trace_id: TraceId, http: crate::model::HttpInfo) {
         if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
             ss.add_http(http)
         }
     }
 
     /// Record tag info onto a span
-    fn span_record_tag(&mut self, trace_id: u64, key: String, value: String) {
+    fn span_record_tag(&mut self, trace_id: TraceId, key: String, value: String) {
         if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
             ss.add_tag(key, value)
         }
     }
 
-    fn get_trace_id_for_thread(&self, thread_id: u64) -> Option<u64> {
+    fn get_trace_id_for_thread(&self, thread_id: ThreadId) -> Option<u64> {
         self.current_trace_for_thread.get(&thread_id).map(|i| *i)
     }
 
-    fn set_current_trace(&mut self, thread_id: u64, trace_id: u64) {
+    fn set_current_trace(&mut self, thread_id: ThreadId, trace_id: TraceId) {
         self.current_trace_for_thread.insert(thread_id, trace_id);
         self.current_thread_for_trace.insert(trace_id, thread_id);
     }
 
-    fn remove_current_trace(&mut self, trace_id: u64) {
+    fn remove_current_trace(&mut self, trace_id: TraceId) {
         let thread_id = self.current_thread_for_trace.remove(&trace_id);
         if let Some(thr) = thread_id {
             self.current_trace_for_thread.remove(&thr);
@@ -342,7 +352,7 @@ impl SpanStorage {
     }
 
     /// Get the id, if present, of the most current span for the given trace
-    fn current_span_id(&self, trace_id: u64) -> Option<u64> {
+    fn current_span_id(&self, trace_id: TraceId) -> Option<SpanId> {
         self.traces.get(&trace_id).and_then(|s| s.current_span_id())
     }
 }
@@ -471,7 +481,7 @@ fn trace_server_loop(
                 trace!("EXIT SPAN: {}", span_id);
                 storage.write().unwrap().exit_span(span_id);
             }
-            Ok(TraceCommand::Event(_nanos, thread_id, mut event)) => {
+            Ok(TraceCommand::Event(_nanos, thread_id, mut event, time)) => {
                 trace!("EVENT: {:?}", event);
                 // Events are only valid if the trace_id flag is set
                 // Send trace specified the trace to send, so use that instead of the thread's
@@ -480,7 +490,10 @@ fn trace_server_loop(
                     .remove("send_trace")
                     .and_then(|t| t.parse::<u64>().ok())
                 {
-                    let send_vec = storage.write().unwrap().drain_completed(send_trace_id);
+                    let send_vec = storage
+                        .write()
+                        .unwrap()
+                        .drain_completed(send_trace_id, time);
                     // Thread has ended this trace.  Until it enters a new span, it
                     // is not in a trace.
                     storage.write().unwrap().remove_current_trace(send_trace_id);
@@ -590,7 +603,7 @@ impl DatadogTracing {
             .map_err(|_| ())
     }
 
-    fn send_enter_span(&self, nanos: u64, thread_id: u64, id: u64) -> Result<(), ()> {
+    fn send_enter_span(&self, nanos: u64, thread_id: ThreadId, id: SpanId) -> Result<(), ()> {
         self.buffer_sender
             .lock()
             .unwrap()
@@ -599,7 +612,7 @@ impl DatadogTracing {
             .map_err(|_| ())
     }
 
-    fn send_exit_span(&self, nanos: u64, id: u64) -> Result<(), ()> {
+    fn send_exit_span(&self, nanos: u64, id: SpanId) -> Result<(), ()> {
         self.buffer_sender
             .lock()
             .unwrap()
@@ -608,7 +621,7 @@ impl DatadogTracing {
             .map_err(|_| ())
     }
 
-    fn send_close_span(&self, nanos: u64, span_id: u64) -> Result<(), ()> {
+    fn send_close_span(&self, nanos: u64, span_id: SpanId) -> Result<(), ()> {
         self.buffer_sender
             .lock()
             .unwrap()
@@ -620,13 +633,14 @@ impl DatadogTracing {
     fn send_event(
         &self,
         nanos: u64,
-        thread_id: u64,
+        thread_id: ThreadId,
         event: HashMap<String, String>,
+        time: DateTime<Utc>,
     ) -> Result<(), ()> {
         self.buffer_sender
             .lock()
             .unwrap()
-            .send(TraceCommand::Event(nanos, thread_id, event))
+            .send(TraceCommand::Event(nanos, thread_id, event, time))
             .map(|_| ())
             .map_err(|_| ())
     }
@@ -643,12 +657,34 @@ fn log_level_to_trace_level(level: log::Level) -> tracing::Level {
     }
 }
 
-thread_local! {
-    static THREAD_ID: u64 = Utc::now().timestamp_nanos() as u64;
+lazy_static! {
+    static ref UNIQUEID_COUNTER: AtomicU16 = AtomicU16::new(0);
+    static ref THREAD_COUNTER: AtomicU32 = AtomicU32::new(0);
 }
 
-pub fn get_thread_id() -> u64 {
+thread_local! {
+    static THREAD_ID: ThreadId = THREAD_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+pub fn get_thread_id() -> ThreadId {
     THREAD_ID.with(|id| *id)
+}
+
+// Format
+// |                       6 bytes                       |      2 bytes    |
+// +--------+--------+--------+--------+--------+--------+--------+--------+
+// |     number of milliseconds since epoch (1970)       | static counter  |
+// +--------+--------+--------+--------+--------+--------+--------+--------+
+// 0        8        16       24       32       40       48       56       64
+//
+// This will hold up to the year 10,000 before it cycles.
+pub fn create_unique_id64() -> u64 {
+    let now = Utc::now();
+    let baseline = Utc.timestamp(0, 0);
+
+    let millis_since_epoch: u64 =
+        (now.signed_duration_since(baseline).num_milliseconds() << 16) as u64;
+    millis_since_epoch + UNIQUEID_COUNTER.fetch_add(1, Ordering::Relaxed) as u64
 }
 
 pub struct HashMapVisitor {
@@ -724,7 +760,7 @@ impl tracing::Subscriber for DatadogTracing {
         let mut new_evt_visitor = HashMapVisitor::new();
         event.record(&mut new_evt_visitor);
 
-        self.send_event(nanos, thread_id, new_evt_visitor.fields)
+        self.send_event(nanos, thread_id, new_evt_visitor.fields, Utc::now())
             .unwrap_or(());
     }
 
@@ -926,7 +962,7 @@ mod tests {
 
     #[tokio::test(threaded_scheduler)]
     async fn test_trace_one_func_stack() {
-        let trace_id = Utc::now().timestamp_nanos() as u64;
+        let trace_id = create_unique_id64();
         trace_config();
         let f1 = tokio::spawn(async move {
             traced_func_no_send(trace_id).await;
@@ -939,8 +975,8 @@ mod tests {
 
     #[tokio::test(threaded_scheduler)]
     async fn test_parallel_two_threads_two_traces() {
-        let trace_id1 = Utc::now().timestamp_nanos() as u64;
-        let trace_id2 = Utc::now().timestamp_nanos() as u64;
+        let trace_id1 = create_unique_id64();
+        let trace_id2 = create_unique_id64();
         trace_config();
         let f1 = tokio::spawn(async move {
             traced_func_no_send(trace_id1).await;
@@ -966,16 +1002,16 @@ mod tests {
             .max_threads(2)
             .build()
             .unwrap();
-        let trace_id1 = Utc::now().timestamp_nanos() as u64;
-        let trace_id2 = Utc::now().timestamp_nanos() as u64 + 1;
-        let trace_id3 = Utc::now().timestamp_nanos() as u64 + 2;
-        let trace_id4 = Utc::now().timestamp_nanos() as u64 + 3;
-        let trace_id5 = Utc::now().timestamp_nanos() as u64 + 4;
-        let trace_id6 = Utc::now().timestamp_nanos() as u64 + 5;
-        let trace_id7 = Utc::now().timestamp_nanos() as u64 + 6;
-        let trace_id8 = Utc::now().timestamp_nanos() as u64 + 7;
-        let trace_id9 = Utc::now().timestamp_nanos() as u64 + 8;
-        let trace_id10 = Utc::now().timestamp_nanos() as u64 + 9;
+        let trace_id1 = create_unique_id64();
+        let trace_id2 = create_unique_id64() + 1;
+        let trace_id3 = create_unique_id64() + 2;
+        let trace_id4 = create_unique_id64() + 3;
+        let trace_id5 = create_unique_id64() + 4;
+        let trace_id6 = create_unique_id64() + 5;
+        let trace_id7 = create_unique_id64() + 6;
+        let trace_id8 = create_unique_id64() + 7;
+        let trace_id9 = create_unique_id64() + 8;
+        let trace_id10 = create_unique_id64() + 9;
         trace_config();
         rt.block_on(async move {
             let f1 = tokio::spawn(async move {
@@ -1037,7 +1073,7 @@ mod tests {
 
     #[tokio::test(threaded_scheduler)]
     async fn test_error_span() {
-        let trace_id = Utc::now().timestamp_nanos() as u64;
+        let trace_id = create_unique_id64();
         trace_config();
         let f3 = tokio::spawn(async move {
             traced_error_func(trace_id).await;
@@ -1048,7 +1084,7 @@ mod tests {
 
     #[tokio::test(threaded_scheduler)]
     async fn test_error_span_as_single_event() {
-        let trace_id = Utc::now().timestamp_nanos() as u64;
+        let trace_id = create_unique_id64();
         trace_config();
         let f4 = tokio::spawn(async move {
             traced_error_func_single_event(trace_id).await;
@@ -1059,7 +1095,7 @@ mod tests {
 
     #[tokio::test(threaded_scheduler)]
     async fn test_two_funcs_in_one_span() {
-        let trace_id = Utc::now().timestamp_nanos() as u64;
+        let trace_id = create_unique_id64();
         trace_config();
         let f5 = tokio::spawn(async move {
             traced_func_no_send(trace_id).await;
@@ -1073,8 +1109,8 @@ mod tests {
 
     #[tokio::test(threaded_scheduler)]
     async fn test_one_thread_two_funcs_serial_two_traces() {
-        let trace_id1 = Utc::now().timestamp_nanos() as u64;
-        let trace_id2 = Utc::now().timestamp_nanos() as u64 + 1;
+        let trace_id1 = create_unique_id64();
+        let trace_id2 = create_unique_id64();
         trace_config();
         let f7 = tokio::spawn(async move {
             traced_func_no_send(trace_id1).await;
