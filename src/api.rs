@@ -84,7 +84,7 @@ impl RawSpan {
             start: span.start.timestamp_nanos() as u64,
             duration: span.duration.num_nanoseconds().unwrap_or(0) as u64,
             error: if span.error.is_some() { 1 } else { 0 },
-            r#type: "custom".to_string(),
+            r#type: if span.http.is_none() { "custom" } else { "web" }.to_string(),
             meta: fill_meta(&span, env.clone()),
             metrics: fill_metrics(cfg),
         }
@@ -151,7 +151,7 @@ mod tests {
             name: span.name.clone(),
             resource: span.resource.clone(),
             service: config.service.clone(),
-            r#type: "custom".into(),
+            r#type: "web".into(),
             start: span.start.timestamp_nanos() as u64,
             duration: span.duration.num_nanoseconds().unwrap_or(0) as u64,
             error: 0,

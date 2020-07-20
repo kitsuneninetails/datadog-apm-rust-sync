@@ -5,11 +5,12 @@ use crate::{api::RawSpan, model::Span};
 use hyper::header::{ContentLength, Headers};
 use lazy_static::lazy_static;
 use log::{error, trace, warn, Level as LogLevel, Log, Record};
+use rand::Rng;
 use serde_json::to_string;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicU16, AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU8, Ordering},
         mpsc, Arc, Mutex, RwLock,
     },
 };
@@ -497,6 +498,7 @@ fn trace_server_loop(
                     // Thread has ended this trace.  Until it enters a new span, it
                     // is not in a trace.
                     storage.write().unwrap().remove_current_trace(send_trace_id);
+                    trace!("Pulling trace for ID: {}=[{:?}]", send_trace_id, send_vec);
                     if !send_vec.is_empty() {
                         client.send(send_vec);
                     }
@@ -658,7 +660,7 @@ fn log_level_to_trace_level(level: log::Level) -> tracing::Level {
 }
 
 lazy_static! {
-    static ref UNIQUEID_COUNTER: AtomicU16 = AtomicU16::new(0);
+    static ref UNIQUEID_COUNTER: AtomicU8 = AtomicU8::new(0);
     static ref THREAD_COUNTER: AtomicU32 = AtomicU32::new(0);
 }
 
@@ -684,7 +686,10 @@ pub fn create_unique_id64() -> u64 {
 
     let millis_since_epoch: u64 =
         (now.signed_duration_since(baseline).num_milliseconds() << 16) as u64;
-    millis_since_epoch + UNIQUEID_COUNTER.fetch_add(1, Ordering::Relaxed) as u64
+    let rand: u8 = rand::thread_rng().gen_range::<u8>(0, 255u8);
+    millis_since_epoch
+        + ((rand as u64) << 8)
+        + UNIQUEID_COUNTER.fetch_add(1, Ordering::Relaxed) as u64
 }
 
 pub struct HashMapVisitor {
@@ -892,6 +897,24 @@ mod tests {
         let _e = span.enter();
         debug!("Performing some function for id={}", trace_id);
         long_call(trace_id).await;
+    }
+
+    async fn traced_http_func(trace_id: u64) {
+        let span = span!(
+            tracing::Level::INFO,
+            "traced_http_func",
+            trace_id = trace_id
+        );
+        let _e = span.enter();
+        debug!("Performing some function for id={}", trace_id);
+        long_call(trace_id).await;
+        event!(
+            tracing::Level::INFO,
+            http_url = "http://test.test/",
+            http_status_code = "200",
+            http_method = "GET"
+        );
+        event!(tracing::Level::INFO, send_trace = trace_id);
     }
 
     async fn traced_error_func(trace_id: u64) {
@@ -1120,6 +1143,17 @@ mod tests {
             event!(tracing::Level::INFO, send_trace = trace_id2);
         });
         f7.await.unwrap();
+        ::std::thread::sleep(::std::time::Duration::from_millis(1000));
+    }
+
+    #[tokio::test(threaded_scheduler)]
+    async fn test_http_span() {
+        let trace_id = create_unique_id64();
+        trace_config();
+        let f3 = tokio::spawn(async move {
+            traced_http_func(trace_id).await;
+        });
+        f3.await.unwrap();
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 }
