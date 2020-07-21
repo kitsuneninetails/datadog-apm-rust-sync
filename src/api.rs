@@ -14,17 +14,6 @@ fn fill_meta(span: &Span, env: Option<String>) -> HashMap<String, String> {
     if let Some(env) = env {
         meta.insert("env".to_string(), env);
     }
-
-    if let Some(http) = &span.http {
-        meta.insert("http.status_code".to_string(), http.status_code.clone());
-        meta.insert("http.method".to_string(), http.method.clone());
-        meta.insert("http.url".to_string(), http.url.clone());
-    }
-    if let Some(error) = &span.error {
-        meta.insert("error.type".to_string(), error.r#type.clone());
-        meta.insert("error.msg".to_string(), error.msg.clone());
-        meta.insert("error.stack".to_string(), error.stack.clone());
-    }
     if let Some(sql) = &span.sql {
         meta.insert("sql.query".to_string(), sql.query.clone());
         meta.insert("sql.rows".to_string(), sql.rows.clone());
@@ -74,6 +63,8 @@ impl RawSpan {
         env: &Option<String>,
         cfg: &ApmConfig,
     ) -> RawSpan {
+        let http_enabled = span.tags.contains_key(&"http.url".to_string());
+        let is_error = span.tags.contains_key(&"error.message".to_string());
         RawSpan {
             service: service.clone(),
             trace_id: span.trace_id,
@@ -83,83 +74,10 @@ impl RawSpan {
             parent_id: span.parent_id,
             start: span.start.timestamp_nanos() as u64,
             duration: span.duration.num_nanoseconds().unwrap_or(0) as u64,
-            error: if span.error.is_some() { 1 } else { 0 },
-            r#type: if span.http.is_none() { "custom" } else { "web" }.to_string(),
+            error: if is_error { 1 } else { 0 },
+            r#type: if http_enabled { "custom" } else { "web" }.to_string(),
             meta: fill_meta(&span, env.clone()),
             metrics: fill_metrics(cfg),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::client::Config;
-
-    use super::*;
-    use crate::model::HttpInfo;
-    use chrono::{Duration, Utc};
-
-    use rand::Rng;
-
-    #[test]
-    fn test_map_to_raw_spans() {
-        let config = Config {
-            service: String::from("service_name"),
-            env: Some(String::from("staging")),
-            apm_config: ApmConfig {
-                apm_enabled: true,
-                sample_priority: 1f64,
-                sample_rate: 1f64,
-            },
-            ..Config::default()
-        };
-        let mut rng = rand::thread_rng();
-        let span = Span {
-            id: rng.gen::<u64>(),
-            trace_id: rng.gen::<u64>(),
-            name: String::from("request"),
-            resource: String::from("/home/v3"),
-            start: Utc::now(),
-            duration: Duration::seconds(2),
-            parent_id: None,
-            http: Some(HttpInfo {
-                url: String::from("/home/v3/2?trace=true"),
-                method: String::from("GET"),
-                status_code: String::from("200"),
-            }),
-            error: None,
-            sql: None,
-            tags: HashMap::new(),
-        };
-
-        let mut meta: HashMap<String, String> = HashMap::new();
-        meta.insert("env".to_string(), config.env.clone().unwrap());
-        if let Some(http) = &span.http {
-            meta.insert("http.url".to_string(), http.url.clone());
-            meta.insert("http.method".to_string(), http.method.clone());
-            meta.insert("http.status_code".to_string(), http.status_code.clone());
-        }
-
-        let mut metrics = HashMap::new();
-        metrics.insert("_sampling_priority_v1".to_string(), f64::from(1));
-        metrics.insert("_dd1.sr.eausr".to_string(), f64::from(1));
-
-        let expected = RawSpan {
-            trace_id: span.trace_id,
-            span_id: span.id,
-            parent_id: span.parent_id,
-            name: span.name.clone(),
-            resource: span.resource.clone(),
-            service: config.service.clone(),
-            r#type: "web".into(),
-            start: span.start.timestamp_nanos() as u64,
-            duration: span.duration.num_nanoseconds().unwrap_or(0) as u64,
-            error: 0,
-            meta,
-            metrics,
-        };
-        let raw_span = RawSpan::from_span(&span, &config.service, &config.env, &config.apm_config);
-
-        assert_eq!(raw_span, expected);
     }
 }
