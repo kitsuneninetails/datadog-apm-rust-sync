@@ -63,8 +63,8 @@ impl RawSpan {
         env: &Option<String>,
         cfg: &ApmConfig,
     ) -> RawSpan {
-        let http_enabled = span.tags.contains_key(&"http.url".to_string());
-        let is_error = span.tags.contains_key(&"error.message".to_string());
+        let http_enabled = span.tags.contains_key("http.url");
+        let is_error = span.tags.contains_key("error.message");
         RawSpan {
             service: service.clone(),
             trace_id: span.trace_id,
