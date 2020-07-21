@@ -180,27 +180,36 @@ impl SpanCollection {
     fn err_span(&mut self, error: crate::model::ErrorInfo) {
         self.current_spans.pop_back().map(|span| {
             self.current_spans.push_back(Span {
-                error: Some(error),
+                error: Some(error.clone()),
                 ..span
             })
         });
+        self.parent_span = Span {
+            error: Some(error),
+            ..self.parent_span.clone()
+        }
     }
 
     fn add_http(&mut self, http: crate::model::HttpInfo) {
         self.current_spans.pop_back().map(|span| {
             self.current_spans.push_back(Span {
-                http: Some(http),
+                http: Some(http.clone()),
                 ..span
             })
         });
+        self.parent_span = Span {
+            http: Some(http),
+            ..self.parent_span.clone()
+        }
     }
 
     fn add_tag(&mut self, k: String, v: String) {
         self.current_spans.pop_back().map(|span| {
             let mut tags = span.tags;
-            tags.insert(k, v);
+            tags.insert(k.clone(), v.clone());
             self.current_spans.push_back(Span { tags, ..span })
         });
+        self.parent_span.tags.insert(k, v);
     }
 
     fn drain_current(mut self) -> Self {
