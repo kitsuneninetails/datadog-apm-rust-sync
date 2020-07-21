@@ -177,37 +177,9 @@ impl SpanCollection {
         self.entered_spans.back().map(|i| *i)
     }
 
-    fn err_span(&mut self, error: crate::model::ErrorInfo) {
-        self.current_spans.pop_back().map(|span| {
-            self.current_spans.push_back(Span {
-                error: Some(error.clone()),
-                ..span
-            })
-        });
-        self.parent_span = Span {
-            error: Some(error),
-            ..self.parent_span.clone()
-        }
-    }
-
-    fn add_http(&mut self, http: crate::model::HttpInfo) {
-        self.current_spans.pop_back().map(|span| {
-            self.current_spans.push_back(Span {
-                http: Some(http.clone()),
-                ..span
-            })
-        });
-        self.parent_span = Span {
-            http: Some(http),
-            ..self.parent_span.clone()
-        }
-    }
-
     fn add_tag(&mut self, k: String, v: String) {
-        self.current_spans.pop_back().map(|span| {
-            let mut tags = span.tags;
-            tags.insert(k.clone(), v.clone());
-            self.current_spans.push_back(Span { tags, ..span })
+        self.current_spans.back_mut().map(|span| {
+            span.tags.insert(k.clone(), v.clone());
         });
         self.parent_span.tags.insert(k, v);
     }
@@ -324,20 +296,6 @@ impl SpanStorage {
         }
     }
 
-    /// Record an error event on a span
-    fn span_record_error(&mut self, trace_id: TraceId, error: crate::model::ErrorInfo) {
-        if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
-            ss.err_span(error)
-        }
-    }
-
-    /// Record HTTP info onto a span
-    fn span_record_http(&mut self, trace_id: TraceId, http: crate::model::HttpInfo) {
-        if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
-            ss.add_http(http)
-        }
-    }
-
     /// Record tag info onto a span
     fn span_record_tag(&mut self, trace_id: TraceId, key: String, value: String) {
         if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
@@ -364,38 +322,6 @@ impl SpanStorage {
     /// Get the id, if present, of the most current span for the given trace
     fn current_span_id(&self, trace_id: TraceId) -> Option<SpanId> {
         self.traces.get(&trace_id).and_then(|s| s.current_span_id())
-    }
-}
-
-fn to_error_info(
-    msg: Option<String>,
-    t: Option<String>,
-    st: Option<String>,
-) -> Option<crate::model::ErrorInfo> {
-    if msg.is_some() || t.is_some() || st.is_some() {
-        Some(crate::model::ErrorInfo {
-            msg: msg.unwrap_or(String::new()),
-            r#type: t.unwrap_or(String::new()),
-            stack: st.unwrap_or(String::new()),
-        })
-    } else {
-        None
-    }
-}
-
-fn to_http_info(
-    u: Option<String>,
-    st: Option<String>,
-    m: Option<String>,
-) -> Option<crate::model::HttpInfo> {
-    if u.is_some() || st.is_some() || m.is_some() {
-        Some(crate::model::HttpInfo {
-            url: u.unwrap_or(String::new()),
-            status_code: st.unwrap_or(String::new()),
-            method: m.unwrap_or(String::new()),
-        })
-    } else {
-        None
     }
 }
 
@@ -477,9 +403,7 @@ fn trace_server_loop(
                     start: data.start,
                     name: data.name,
                     resource: data.resource,
-                    http: None,
                     sql: None,
-                    error: None,
                     duration: Duration::seconds(0),
                 });
             }
@@ -516,26 +440,13 @@ fn trace_server_loop(
                 // No trace means no tagging.
                 let trace_id_opt = storage.read().unwrap().get_trace_id_for_thread(thread_id);
                 if let Some(trace_id) = trace_id_opt {
-                    let http_evt = to_http_info(
-                        event.remove("http_url"),
-                        event.remove("http_status_code"),
-                        event.remove("http_method"),
-                    );
-
-                    let err_evt = to_error_info(
-                        event.remove("error_msg"),
-                        event.remove("error_type"),
-                        event.remove("error_stack"),
-                    );
-
-                    if let Some(h) = http_evt {
-                        storage.write().unwrap().span_record_http(trace_id, h);
+                    if let Some(type_event) = event.remove("error.etype") {
+                        storage.write().unwrap().span_record_tag(
+                            trace_id,
+                            "error.type".to_string(),
+                            type_event,
+                        )
                     }
-
-                    if let Some(e) = err_evt {
-                        storage.write().unwrap().span_record_error(trace_id, e)
-                    }
-
                     event.into_iter().for_each(|(k, v)| {
                         storage.write().unwrap().span_record_tag(trace_id, k, v)
                     });
@@ -919,9 +830,9 @@ mod tests {
         long_call(trace_id).await;
         event!(
             tracing::Level::INFO,
-            http_url = "http://test.test/",
-            http_status_code = "200",
-            http_method = "GET"
+            http.url = "http://test.test/",
+            http.status_code = "200",
+            http.method = "GET"
         );
         event!(tracing::Level::INFO, send_trace = trace_id);
     }
@@ -937,14 +848,14 @@ mod tests {
         long_call(trace_id).await;
         event!(
             tracing::Level::ERROR,
-            error_type = "",
-            error_msg = "Test error"
+            error.etype = "",
+            error.message = "Test error"
         );
         event!(
             tracing::Level::ERROR,
-            http_url = "http://test.test/",
-            http_status_code = "400",
-            http_method = "GET"
+            http.url = "http://test.test/",
+            http.status_code = "400",
+            http.method = "GET"
         );
         event!(
             tracing::Level::ERROR,
@@ -967,11 +878,11 @@ mod tests {
         event!(
             tracing::Level::ERROR,
             send_trace = trace_id,
-            error_type = "",
-            error_msg = "Test error",
-            http_url = "http://test.test/",
-            http_status_code = "400",
-            http_method = "GET",
+            error.etype = "",
+            error.message = "Test error",
+            http.url = "http://test.test/",
+            http.status_code = "400",
+            http.method = "GET",
             custom_tag = "good",
             custom_tag2 = "test"
         );
