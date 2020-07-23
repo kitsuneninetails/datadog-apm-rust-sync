@@ -7,7 +7,9 @@ use lazy_static::lazy_static;
 use log::{error, trace, warn, Level as LogLevel, Log, Record};
 use rand::Rng;
 use serde_json::to_string;
+use std::borrow::BorrowMut;
 use std::{
+    cell::RefCell,
     collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicU32, AtomicU8, Ordering},
@@ -473,6 +475,7 @@ pub struct DatadogTracing {
 impl DatadogTracing {
     pub fn new(config: Config) -> DatadogTracing {
         let (buffer_sender, buffer_receiver) = mpsc::channel();
+        let sample_rate = config.apm_config.sample_rate;
 
         let client = DdAgentClient {
             env: config.env,
@@ -497,6 +500,15 @@ impl DatadogTracing {
             log::set_max_level(lc.level.to_level_filter());
         }
         if config.enable_tracing {
+            // Only set the global sample rate once when the tracer is set as the global tracer.
+            // This must be marked unsafe because we are overwriting a global, but it only gets done
+            // once in a process's lifetime.
+            unsafe {
+                if SAMPLING_RATE.is_none() {
+                    SAMPLING_RATE = Some(sample_rate);
+                }
+            }
+
             tracing::subscriber::set_global_default(tracer.clone()).unwrap_or_else(|_| {
                 warn!(
                     "Global subscriber has already been set!  \
@@ -505,6 +517,10 @@ impl DatadogTracing {
             });
         }
         tracer
+    }
+
+    pub fn get_global_sampling_rate() -> f64 {
+        unsafe { SAMPLING_RATE.clone().unwrap_or(0f64) }
     }
 
     fn send_log(&self, record: LogRecord) -> Result<(), ()> {
@@ -584,12 +600,25 @@ lazy_static! {
     static ref THREAD_COUNTER: AtomicU32 = AtomicU32::new(0);
 }
 
+static mut SAMPLING_RATE: Option<f64> = None;
+
 thread_local! {
-    static THREAD_ID: ThreadId = THREAD_COUNTER.fetch_add(1, Ordering::Relaxed)
+    static THREAD_ID: ThreadId = THREAD_COUNTER.fetch_add(1, Ordering::Relaxed);
+    static CURRENT_SPAN_ID: RwLock<RefCell<Option<SpanId>>> = RwLock::new(RefCell::new(None));
 }
 
 pub fn get_thread_id() -> ThreadId {
     THREAD_ID.with(|id| *id)
+}
+
+pub fn get_current_span_id() -> Option<SpanId> {
+    CURRENT_SPAN_ID.with(|id| *id.read().unwrap().borrow())
+}
+
+pub fn set_current_span_id(new_id: Option<SpanId>) {
+    CURRENT_SPAN_ID.with(|id| {
+        id.write().unwrap().borrow_mut().replace(new_id);
+    })
 }
 
 // Format
@@ -694,12 +723,14 @@ impl tracing::Subscriber for DatadogTracing {
         let thread_id = get_thread_id();
         self.send_enter_span(nanos, thread_id, span.clone().into_u64())
             .unwrap_or(());
+        set_current_span_id(Some(span.into_u64()));
     }
 
     fn exit(&self, span: &tracing::span::Id) {
         let nanos = Utc::now().timestamp_nanos() as u64;
         self.send_exit_span(nanos, span.clone().into_u64())
             .unwrap_or(());
+        set_current_span_id(None);
     }
 
     fn try_close(&self, span: tracing::span::Id) -> bool {
@@ -804,7 +835,11 @@ mod tests {
         let span = span!(tracing::Level::INFO, "sleep_call", trace_id = trace_id);
         let _e = span.enter();
         debug!("Long call {}", trace_id);
-        debug!("Current thread ID: {}", get_thread_id());
+        debug!(
+            "Current thread ID/span ID: {}/{:?}",
+            get_thread_id(),
+            get_current_span_id()
+        );
         std::thread::sleep(std::time::Duration::from_millis(2000));
     }
 
@@ -815,7 +850,11 @@ mod tests {
             trace_id = trace_id
         );
         let _e = span.enter();
-        debug!("Performing some function for id={}", trace_id);
+        debug!(
+            "Performing some function for id={}/{:?}",
+            trace_id,
+            get_current_span_id()
+        );
         long_call(trace_id).await;
     }
 
@@ -826,7 +865,11 @@ mod tests {
             trace_id = trace_id
         );
         let _e = span.enter();
-        debug!("Performing some function for id={}", trace_id);
+        debug!(
+            "Performing some function for id={}/{:?}",
+            trace_id,
+            get_current_span_id()
+        );
         long_call(trace_id).await;
         event!(
             tracing::Level::INFO,
@@ -844,7 +887,11 @@ mod tests {
             trace_id = trace_id
         );
         let _e = span.enter();
-        debug!("Performing some function for id={}", trace_id);
+        debug!(
+            "Performing some function for id={}/{:?}",
+            trace_id,
+            get_current_span_id()
+        );
         long_call(trace_id).await;
         event!(
             tracing::Level::ERROR,
@@ -873,7 +920,11 @@ mod tests {
         );
         let _e = span.enter();
 
-        debug!("Performing some function for trace_id={}", trace_id);
+        debug!(
+            "Performing some function for id={}/{:?}",
+            trace_id,
+            get_current_span_id()
+        );
         long_call(trace_id).await;
         event!(
             tracing::Level::ERROR,
@@ -907,11 +958,25 @@ mod tests {
     async fn test_trace_one_func_stack() {
         let trace_id = create_unique_id64();
         trace_config();
+
+        debug!(
+            "Outside of span, this should be None: {:?}",
+            get_current_span_id()
+        );
+        debug!(
+            "Sampling rate is {}",
+            DatadogTracing::get_global_sampling_rate()
+        );
+
         let f1 = tokio::spawn(async move {
             traced_func_no_send(trace_id).await;
             event!(tracing::Level::INFO, send_trace = trace_id);
         });
 
+        debug!(
+            "Same as before span, after span completes, this should be None: {:?}",
+            get_current_span_id()
+        );
         f1.await.unwrap();
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
