@@ -62,7 +62,7 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         LoggingConfig {
             level: LogLevel::Info,
-            time_format: "%Y-%m-%d %H:%M:%S%z".to_string(),
+            time_format: "%Y-%m-%dT%H:%M:%S.%3f%z".to_string(),
             mod_filter: Vec::new(),
             body_filter: Vec::new(),
         }
