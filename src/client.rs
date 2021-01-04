@@ -954,7 +954,7 @@ mod tests {
         let _client = DatadogTracing::new(config);
     }
 
-    #[tokio::test(threaded_scheduler)]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_trace_one_func_stack() {
         let trace_id = create_unique_id64();
         trace_config();
@@ -981,7 +981,7 @@ mod tests {
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 
-    #[tokio::test(threaded_scheduler)]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_parallel_two_threads_two_traces() {
         let trace_id1 = create_unique_id64();
         let trace_id2 = create_unique_id64();
@@ -1003,11 +1003,9 @@ mod tests {
 
     #[test]
     fn test_parallel_two_threads_ten_traces() {
-        let mut rt = tokio::runtime::Builder::new()
-            .threaded_scheduler()
+        let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .core_threads(2)
-            .max_threads(2)
+            .worker_threads(2)
             .build()
             .unwrap();
         let trace_id1 = create_unique_id64();
@@ -1079,7 +1077,7 @@ mod tests {
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 
-    #[tokio::test(threaded_scheduler)]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_error_span() {
         let trace_id = create_unique_id64();
         trace_config();
@@ -1090,7 +1088,7 @@ mod tests {
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 
-    #[tokio::test(threaded_scheduler)]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_error_span_as_single_event() {
         let trace_id = create_unique_id64();
         trace_config();
@@ -1101,7 +1099,7 @@ mod tests {
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 
-    #[tokio::test(threaded_scheduler)]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_two_funcs_in_one_span() {
         let trace_id = create_unique_id64();
         trace_config();
@@ -1115,7 +1113,7 @@ mod tests {
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 
-    #[tokio::test(threaded_scheduler)]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_one_thread_two_funcs_serial_two_traces() {
         let trace_id1 = create_unique_id64();
         let trace_id2 = create_unique_id64();
@@ -1131,7 +1129,7 @@ mod tests {
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 
-    #[tokio::test(threaded_scheduler)]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_http_span() {
         let trace_id = create_unique_id64();
         trace_config();
