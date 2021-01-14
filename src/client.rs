@@ -1,11 +1,13 @@
-use chrono::{DateTime, Duration, TimeZone, Utc};
-use hyper::method::Method;
-
 use crate::{api::RawSpan, model::Span};
-use hyper::header::{ContentLength, Headers};
+
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use lazy_static::lazy_static;
 use log::{error, trace, warn, Level as LogLevel, Log, Record};
 use rand::Rng;
+use reqwest::{
+    header::{HeaderMap, HeaderValue},
+    Method,
+};
 use serde_json::to_string;
 use std::borrow::BorrowMut;
 use std::{
@@ -481,7 +483,7 @@ impl DatadogTracing {
             env: config.env,
             service: config.service,
             endpoint: format!("http://{}:{}/v0.3/traces", config.host, config.port),
-            http_client: Arc::new(hyper::Client::new()),
+            http_client: Arc::new(reqwest::blocking::Client::new()),
             apm_config: config.apm_config,
         };
 
@@ -775,7 +777,7 @@ struct DdAgentClient {
     env: Option<String>,
     endpoint: String,
     service: String,
-    http_client: Arc<hyper::Client>,
+    http_client: Arc<reqwest::blocking::Client>,
     apm_config: ApmConfig,
 }
 
@@ -792,21 +794,22 @@ impl DdAgentClient {
             Ok(payload) => {
                 trace!("Sending to localhost agent payload: {:?}", payload);
 
-                let mut headers = Headers::new();
-                headers.set(ContentLength(payload.len() as u64));
-                headers.set_raw("Content-Type", vec![b"application/json".to_vec()]);
-                headers.set_raw(
-                    "X-Datadog-Trace-Count",
-                    vec![format!("{}", count).into_bytes().to_vec()],
+                let mut headers = HeaderMap::new();
+                headers.insert("Content-Length", HeaderValue::from(payload.len() as u64));
+                headers.insert(
+                    "Content-Type",
+                    HeaderValue::from_str("application/json")
+                        .expect("String didn't parse for header (VERY BAD)"),
                 );
+                headers.insert("X-Datadog-Trace-Count", HeaderValue::from(count));
                 let req = self
                     .http_client
-                    .request(Method::Post, &self.endpoint)
+                    .request(Method::POST, &self.endpoint)
                     .headers(headers)
-                    .body(payload.as_str());
+                    .body(payload);
 
                 match req.send() {
-                    Ok(resp) if resp.status.is_success() => {
+                    Ok(resp) if resp.status().is_success() => {
                         trace!("Sent to localhost agent: {:?}", resp)
                     }
                     Ok(resp) => error!("error from datadog agent: {:?}", resp),
@@ -823,7 +826,7 @@ mod tests {
     use log::{debug, info, Level};
     use tracing::{event, span};
 
-    async fn long_call(trace_id: u64) {
+    fn long_call(trace_id: u64) {
         let span = span!(tracing::Level::INFO, "long_call", trace_id = trace_id);
         let _e = span.enter();
         debug!("Waiting on I/O {}", trace_id);
@@ -843,7 +846,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(2000));
     }
 
-    async fn traced_func_no_send(trace_id: u64) {
+    fn traced_func_no_send(trace_id: u64) {
         let span = span!(
             tracing::Level::INFO,
             "traced_func_no_send",
@@ -855,10 +858,10 @@ mod tests {
             trace_id,
             get_current_span_id()
         );
-        long_call(trace_id).await;
+        long_call(trace_id);
     }
 
-    async fn traced_http_func(trace_id: u64) {
+    fn traced_http_func(trace_id: u64) {
         let span = span!(
             tracing::Level::INFO,
             "traced_http_func",
@@ -870,7 +873,7 @@ mod tests {
             trace_id,
             get_current_span_id()
         );
-        long_call(trace_id).await;
+        long_call(trace_id);
         event!(
             tracing::Level::INFO,
             http.url = "http://test.test/",
@@ -880,7 +883,7 @@ mod tests {
         event!(tracing::Level::INFO, send_trace = trace_id);
     }
 
-    async fn traced_error_func(trace_id: u64) {
+    fn traced_error_func(trace_id: u64) {
         let span = span!(
             tracing::Level::INFO,
             "traced_error_func",
@@ -892,7 +895,7 @@ mod tests {
             trace_id,
             get_current_span_id()
         );
-        long_call(trace_id).await;
+        long_call(trace_id);
         event!(
             tracing::Level::ERROR,
             error.etype = "",
@@ -912,7 +915,7 @@ mod tests {
         );
     }
 
-    async fn traced_error_func_single_event(trace_id: u64) {
+    fn traced_error_func_single_event(trace_id: u64) {
         let span = span!(
             tracing::Level::INFO,
             "traced_error_func_single_event",
@@ -925,7 +928,7 @@ mod tests {
             trace_id,
             get_current_span_id()
         );
-        long_call(trace_id).await;
+        long_call(trace_id);
         event!(
             tracing::Level::ERROR,
             send_trace = trace_id,
@@ -954,8 +957,8 @@ mod tests {
         let _client = DatadogTracing::new(config);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_trace_one_func_stack() {
+    #[test]
+    fn test_trace_one_func_stack() {
         let trace_id = create_unique_id64();
         trace_config();
 
@@ -968,8 +971,8 @@ mod tests {
             DatadogTracing::get_global_sampling_rate()
         );
 
-        let f1 = tokio::spawn(async move {
-            traced_func_no_send(trace_id).await;
+        let f1 = std::thread::spawn(move || {
+            traced_func_no_send(trace_id);
             event!(tracing::Level::INFO, send_trace = trace_id);
         });
 
@@ -977,37 +980,31 @@ mod tests {
             "Same as before span, after span completes, this should be None: {:?}",
             get_current_span_id()
         );
-        f1.await.unwrap();
+        f1.join().unwrap();
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_parallel_two_threads_two_traces() {
+    #[test]
+    fn test_parallel_two_threads_two_traces() {
         let trace_id1 = create_unique_id64();
         let trace_id2 = create_unique_id64();
         trace_config();
-        let f1 = tokio::spawn(async move {
-            traced_func_no_send(trace_id1).await;
+        let f1 = std::thread::spawn(move || {
+            traced_func_no_send(trace_id1);
             event!(tracing::Level::INFO, send_trace = trace_id1);
         });
-        let f2 = tokio::spawn(async move {
-            traced_func_no_send(trace_id2).await;
+        let f2 = std::thread::spawn(move || {
+            traced_func_no_send(trace_id2);
             event!(tracing::Level::INFO, send_trace = trace_id2);
         });
 
-        let (r1, r2) = tokio::join!(f1, f2);
-        r1.unwrap();
-        r2.unwrap();
+        f1.join().unwrap();
+        f2.join().unwrap();
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 
     #[test]
     fn test_parallel_two_threads_ten_traces() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(2)
-            .build()
-            .unwrap();
         let trace_id1 = create_unique_id64();
         let trace_id2 = create_unique_id64() + 1;
         let trace_id3 = create_unique_id64() + 2;
@@ -1019,124 +1016,120 @@ mod tests {
         let trace_id9 = create_unique_id64() + 8;
         let trace_id10 = create_unique_id64() + 9;
         trace_config();
-        rt.block_on(async move {
-            let f1 = tokio::spawn(async move {
-                traced_func_no_send(trace_id1).await;
-                event!(tracing::Level::INFO, send_trace = trace_id1);
-            });
-            let f2 = tokio::spawn(async move {
-                traced_func_no_send(trace_id2).await;
-                event!(tracing::Level::INFO, send_trace = trace_id2);
-            });
-            let f3 = tokio::spawn(async move {
-                traced_func_no_send(trace_id3).await;
-                event!(tracing::Level::INFO, send_trace = trace_id3);
-            });
-            let f4 = tokio::spawn(async move {
-                traced_func_no_send(trace_id4).await;
-                event!(tracing::Level::INFO, send_trace = trace_id4);
-            });
-            let f5 = tokio::spawn(async move {
-                traced_func_no_send(trace_id5).await;
-                event!(tracing::Level::INFO, send_trace = trace_id5);
-            });
-            let f6 = tokio::spawn(async move {
-                traced_func_no_send(trace_id6).await;
-                event!(tracing::Level::INFO, send_trace = trace_id6);
-            });
-            let f7 = tokio::spawn(async move {
-                traced_func_no_send(trace_id7).await;
-                event!(tracing::Level::INFO, send_trace = trace_id7);
-            });
-            let f8 = tokio::spawn(async move {
-                traced_func_no_send(trace_id8).await;
-                event!(tracing::Level::INFO, send_trace = trace_id8);
-            });
-            let f9 = tokio::spawn(async move {
-                traced_func_no_send(trace_id9).await;
-                event!(tracing::Level::INFO, send_trace = trace_id9);
-            });
-            let f10 = tokio::spawn(async move {
-                traced_func_no_send(trace_id10).await;
-                event!(tracing::Level::INFO, send_trace = trace_id10);
-            });
-            let (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10) =
-                tokio::join!(f1, f2, f3, f4, f5, f6, f7, f8, f9, f10);
-            r1.unwrap();
-            r2.unwrap();
-            r3.unwrap();
-            r4.unwrap();
-            r5.unwrap();
-            r6.unwrap();
-            r7.unwrap();
-            r8.unwrap();
-            r9.unwrap();
-            r10.unwrap();
+        let f1 = std::thread::spawn(move || {
+            traced_func_no_send(trace_id1);
+            event!(tracing::Level::INFO, send_trace = trace_id1);
         });
+        let f2 = std::thread::spawn(move || {
+            traced_func_no_send(trace_id2);
+            event!(tracing::Level::INFO, send_trace = trace_id2);
+        });
+        let f3 = std::thread::spawn(move || {
+            traced_func_no_send(trace_id3);
+            event!(tracing::Level::INFO, send_trace = trace_id3);
+        });
+        let f4 = std::thread::spawn(move || {
+            traced_func_no_send(trace_id4);
+            event!(tracing::Level::INFO, send_trace = trace_id4);
+        });
+        let f5 = std::thread::spawn(move || {
+            traced_func_no_send(trace_id5);
+            event!(tracing::Level::INFO, send_trace = trace_id5);
+        });
+        let f6 = std::thread::spawn(move || {
+            traced_func_no_send(trace_id6);
+            event!(tracing::Level::INFO, send_trace = trace_id6);
+        });
+        let f7 = std::thread::spawn(move || {
+            traced_func_no_send(trace_id7);
+            event!(tracing::Level::INFO, send_trace = trace_id7);
+        });
+        let f8 = std::thread::spawn(move || {
+            traced_func_no_send(trace_id8);
+            event!(tracing::Level::INFO, send_trace = trace_id8);
+        });
+        let f9 = std::thread::spawn(move || {
+            traced_func_no_send(trace_id9);
+            event!(tracing::Level::INFO, send_trace = trace_id9);
+        });
+        let f10 = std::thread::spawn(move || {
+            traced_func_no_send(trace_id10);
+            event!(tracing::Level::INFO, send_trace = trace_id10);
+        });
+        f1.join().unwrap();
+        f2.join().unwrap();
+        f3.join().unwrap();
+        f4.join().unwrap();
+        f5.join().unwrap();
+        f6.join().unwrap();
+        f7.join().unwrap();
+        f8.join().unwrap();
+        f9.join().unwrap();
+        f10.join().unwrap();
 
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_error_span() {
+    #[test]
+    fn test_error_span() {
         let trace_id = create_unique_id64();
         trace_config();
-        let f3 = tokio::spawn(async move {
-            traced_error_func(trace_id).await;
+        let f3 = std::thread::spawn(move || {
+            traced_error_func(trace_id);
         });
-        f3.await.unwrap();
+        f3.join().unwrap();
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_error_span_as_single_event() {
+    #[test]
+    fn test_error_span_as_single_event() {
         let trace_id = create_unique_id64();
         trace_config();
-        let f4 = tokio::spawn(async move {
-            traced_error_func_single_event(trace_id).await;
+        let f4 = std::thread::spawn(move || {
+            traced_error_func_single_event(trace_id);
         });
-        f4.await.unwrap();
+        f4.join().unwrap();
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_two_funcs_in_one_span() {
+    #[test]
+    fn test_two_funcs_in_one_span() {
         let trace_id = create_unique_id64();
         trace_config();
-        let f5 = tokio::spawn(async move {
-            traced_func_no_send(trace_id).await;
-            traced_func_no_send(trace_id).await;
+        let f5 = std::thread::spawn(move || {
+            traced_func_no_send(trace_id);
+            traced_func_no_send(trace_id);
             // Send both funcs under one parent span and one trace
             event!(tracing::Level::INFO, send_trace = trace_id);
         });
-        f5.await.unwrap();
+        f5.join().unwrap();
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_one_thread_two_funcs_serial_two_traces() {
+    #[test]
+    fn test_one_thread_two_funcs_serial_two_traces() {
         let trace_id1 = create_unique_id64();
         let trace_id2 = create_unique_id64();
         trace_config();
-        let f7 = tokio::spawn(async move {
-            traced_func_no_send(trace_id1).await;
+        let f7 = std::thread::spawn(move || {
+            traced_func_no_send(trace_id1);
             event!(tracing::Level::INFO, send_trace = trace_id1);
 
-            traced_func_no_send(trace_id2).await;
+            traced_func_no_send(trace_id2);
             event!(tracing::Level::INFO, send_trace = trace_id2);
         });
-        f7.await.unwrap();
+        f7.join().unwrap();
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_http_span() {
+    #[test]
+    fn test_http_span() {
         let trace_id = create_unique_id64();
         trace_config();
-        let f3 = tokio::spawn(async move {
-            traced_http_func(trace_id).await;
+        let f3 = std::thread::spawn(move || {
+            traced_http_func(trace_id);
         });
-        f3.await.unwrap();
+        f3.join().unwrap();
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 }
