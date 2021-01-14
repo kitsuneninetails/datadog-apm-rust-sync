@@ -1,6 +1,6 @@
 [package]
 name = "datadog-apm-sync"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Michael Micucci <9975355+kitsuneninetails@users.noreply.github.com>", "Fernando Gonçalves <fernando.goncalves@pipefy.com> (original base code)"]
 edition = "2018"
 license = "MIT"
@@ -23,4 +23,4 @@ tracing-futures = "0.2.4"
 
 [dev-dependencies]
 rand = "0.7"
-tokio = { version = "0.2", features = ["full"] }
+tokio = { version = "1.0", features = ["full"] }
