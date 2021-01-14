@@ -1,6 +1,6 @@
 [package]
 name = "datadog-apm-sync"
-version = "0.4.1"
+version = "0.4.2"
 authors = ["Michael Micucci <9975355+kitsuneninetails@users.noreply.github.com>", "Fernando Gonçalves <fernando.goncalves@pipefy.com> (original base code)"]
 edition = "2018"
 license = "MIT"
@@ -11,10 +11,11 @@ repository = "https://github.com/kitsuneninetails/datadog-apm-rust-sync"
 [dependencies]
 chrono = "0.4.19"
 filter-logger = "0.3.0"
+futures = "0.3"
 lazy_static = "1.4.0"
 log = "0.4"
 rand = "0.7"
-reqwest = { version = "0.11", features = ["blocking"] }
+reqwest = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"

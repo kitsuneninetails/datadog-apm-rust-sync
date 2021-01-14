@@ -437,7 +437,7 @@ fn trace_server_loop(
                     storage.write().unwrap().remove_current_trace(send_trace_id);
                     trace!("Pulling trace for ID: {}=[{:?}]", send_trace_id, send_vec);
                     if !send_vec.is_empty() {
-                        client.send(send_vec);
+                        futures::executor::block_on(client.send(send_vec));
                     }
                 }
                 // Tag events only work inside a trace, so get the trace from the thread.
@@ -483,14 +483,12 @@ impl DatadogTracing {
             env: config.env,
             service: config.service,
             endpoint: format!("http://{}:{}/v0.3/traces", config.host, config.port),
-            http_client: Arc::new(reqwest::blocking::Client::new()),
+            http_client: Arc::new(reqwest::Client::new()),
             apm_config: config.apm_config,
         };
 
         let log_config = config.logging_config.clone();
-        std::thread::spawn(move || {
-            trace_server_loop(client, buffer_receiver, log_config);
-        });
+        std::thread::spawn(move || trace_server_loop(client, buffer_receiver, log_config));
 
         let tracer = DatadogTracing {
             buffer_sender: Arc::new(Mutex::new(buffer_sender)),
@@ -777,12 +775,12 @@ struct DdAgentClient {
     env: Option<String>,
     endpoint: String,
     service: String,
-    http_client: Arc<reqwest::blocking::Client>,
+    http_client: Arc<reqwest::Client>,
     apm_config: ApmConfig,
 }
 
 impl DdAgentClient {
-    fn send(self, stack: Vec<Span>) {
+    async fn send(self, stack: Vec<Span>) {
         trace!("Sending spans: {:?}", stack);
         let count = stack.len();
         let spans: Vec<Vec<RawSpan>> = vec![stack
@@ -808,7 +806,7 @@ impl DdAgentClient {
                     .headers(headers)
                     .body(payload);
 
-                match req.send() {
+                match req.send().await {
                     Ok(resp) if resp.status().is_success() => {
                         trace!("Sent to localhost agent: {:?}", resp)
                     }
