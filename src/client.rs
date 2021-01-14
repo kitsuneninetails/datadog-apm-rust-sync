@@ -488,9 +488,7 @@ impl DatadogTracing {
         };
 
         let log_config = config.logging_config.clone();
-        std::thread::spawn(move || {
-            trace_server_loop(client, buffer_receiver, log_config)
-        });
+        std::thread::spawn(move || trace_server_loop(client, buffer_receiver, log_config));
 
         let tracer = DatadogTracing {
             buffer_sender: Arc::new(Mutex::new(buffer_sender)),
