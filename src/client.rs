@@ -1,13 +1,10 @@
 use crate::{api::RawSpan, model::Span};
 
+use attohttpc;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use lazy_static::lazy_static;
 use log::{error, trace, warn, Level as LogLevel, Log, Record};
 use rand::Rng;
-use reqwest::{
-    header::{HeaderMap, HeaderValue},
-    Method,
-};
 use serde_json::to_string;
 use std::borrow::BorrowMut;
 use std::{
@@ -437,7 +434,7 @@ fn trace_server_loop(
                     storage.write().unwrap().remove_current_trace(send_trace_id);
                     trace!("Pulling trace for ID: {}=[{:?}]", send_trace_id, send_vec);
                     if !send_vec.is_empty() {
-                        futures::executor::block_on(client.send(send_vec));
+                        client.send(send_vec);
                     }
                 }
                 // Tag events only work inside a trace, so get the trace from the thread.
@@ -483,7 +480,6 @@ impl DatadogTracing {
             env: config.env,
             service: config.service,
             endpoint: format!("http://{}:{}/v0.3/traces", config.host, config.port),
-            http_client: Arc::new(reqwest::Client::new()),
             apm_config: config.apm_config,
         };
 
@@ -775,12 +771,11 @@ struct DdAgentClient {
     env: Option<String>,
     endpoint: String,
     service: String,
-    http_client: Arc<reqwest::Client>,
     apm_config: ApmConfig,
 }
 
 impl DdAgentClient {
-    async fn send(self, stack: Vec<Span>) {
+    fn send(self, stack: Vec<Span>) {
         trace!("Sending spans: {:?}", stack);
         let count = stack.len();
         let spans: Vec<Vec<RawSpan>> = vec![stack
@@ -791,23 +786,14 @@ impl DdAgentClient {
             Err(e) => warn!("Couldn't encode payload for datadog: {:?}", e),
             Ok(payload) => {
                 trace!("Sending to localhost agent payload: {:?}", payload);
+                let req = attohttpc::post(&self.endpoint)
+                    .header("Content-Length", payload.len() as u64)
+                    .header("Content-Type", "application/json")
+                    .header("X-Datadog-Trace-Count", count)
+                    .text(&payload);
 
-                let mut headers = HeaderMap::new();
-                headers.insert("Content-Length", HeaderValue::from(payload.len() as u64));
-                headers.insert(
-                    "Content-Type",
-                    HeaderValue::from_str("application/json")
-                        .expect("String didn't parse for header (VERY BAD)"),
-                );
-                headers.insert("X-Datadog-Trace-Count", HeaderValue::from(count));
-                let req = self
-                    .http_client
-                    .request(Method::POST, &self.endpoint)
-                    .headers(headers)
-                    .body(payload);
-
-                match req.send().await {
-                    Ok(resp) if resp.status().is_success() => {
+                match req.send() {
+                    Ok(resp) if resp.is_success() => {
                         trace!("Sent to localhost agent: {:?}", resp)
                     }
                     Ok(resp) => error!("error from datadog agent: {:?}", resp),
