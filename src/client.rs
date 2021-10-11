@@ -12,7 +12,7 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicU32, AtomicU8, Ordering},
-        mpsc, Arc, Mutex, RwLock,
+        mpsc, RwLock,
     },
 };
 
@@ -467,9 +467,11 @@ fn trace_server_loop(
 
 #[derive(Debug, Clone)]
 pub struct DatadogTracing {
-    buffer_sender: Arc<Mutex<mpsc::Sender<TraceCommand>>>,
+    buffer_sender: mpsc::Sender<TraceCommand>,
     log_config: Option<LoggingConfig>,
 }
+
+unsafe impl Sync for DatadogTracing {}
 
 impl DatadogTracing {
     pub fn new(config: Config) -> DatadogTracing {
@@ -487,7 +489,7 @@ impl DatadogTracing {
         std::thread::spawn(move || trace_server_loop(client, buffer_receiver, log_config));
 
         let tracer = DatadogTracing {
-            buffer_sender: Arc::new(Mutex::new(buffer_sender)),
+            buffer_sender,
             log_config: config.logging_config,
         };
 
@@ -521,8 +523,7 @@ impl DatadogTracing {
 
     fn send_log(&self, record: LogRecord) -> Result<(), ()> {
         self.buffer_sender
-            .lock()
-            .unwrap()
+            .clone()
             .send(TraceCommand::Log(record))
             .map(|_| ())
             .map_err(|_| ())
@@ -530,8 +531,7 @@ impl DatadogTracing {
 
     fn send_new_span(&self, nanos: u64, span: NewSpanData) -> Result<(), ()> {
         self.buffer_sender
-            .lock()
-            .unwrap()
+            .clone()
             .send(TraceCommand::NewSpan(nanos, span))
             .map(|_| ())
             .map_err(|_| ())
@@ -539,8 +539,7 @@ impl DatadogTracing {
 
     fn send_enter_span(&self, nanos: u64, thread_id: ThreadId, id: SpanId) -> Result<(), ()> {
         self.buffer_sender
-            .lock()
-            .unwrap()
+            .clone()
             .send(TraceCommand::Enter(nanos, thread_id, id))
             .map(|_| ())
             .map_err(|_| ())
@@ -548,8 +547,7 @@ impl DatadogTracing {
 
     fn send_exit_span(&self, nanos: u64, id: SpanId) -> Result<(), ()> {
         self.buffer_sender
-            .lock()
-            .unwrap()
+            .clone()
             .send(TraceCommand::Exit(nanos, id))
             .map(|_| ())
             .map_err(|_| ())
@@ -557,8 +555,7 @@ impl DatadogTracing {
 
     fn send_close_span(&self, nanos: u64, span_id: SpanId) -> Result<(), ()> {
         self.buffer_sender
-            .lock()
-            .unwrap()
+            .clone()
             .send(TraceCommand::CloseSpan(nanos, span_id))
             .map(|_| ())
             .map_err(|_| ())
@@ -572,8 +569,7 @@ impl DatadogTracing {
         time: DateTime<Utc>,
     ) -> Result<(), ()> {
         self.buffer_sender
-            .lock()
-            .unwrap()
+            .clone()
             .send(TraceCommand::Event(nanos, thread_id, event, time))
             .map(|_| ())
             .map_err(|_| ())
