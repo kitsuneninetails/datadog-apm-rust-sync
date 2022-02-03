@@ -258,7 +258,7 @@ impl SpanStorage {
 
     /// End a span and update the current "top of the stack"
     fn end_span(&mut self, nanos: u64, span_id: SpanId) {
-        if let Some(trace_id) = self.spans_to_trace_id.get(&span_id) {
+        if let Some(trace_id) = self.spans_to_trace_id.remove(&span_id) {
             if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
                 ss.end_span(nanos, span_id);
             }
@@ -279,10 +279,12 @@ impl SpanStorage {
 
     /// Exit a span for trace, and keep track so that new spans get the correct parent
     fn exit_span(&mut self, span_id: SpanId) {
-        if let Some(trace_id) = self.spans_to_trace_id.get(&span_id) {
+        let trace_id = self.spans_to_trace_id.get(&span_id).cloned();
+        if let Some(trace_id) = trace_id {
             if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
                 ss.exit_span(span_id);
             }
+            self.remove_current_trace(trace_id);
         }
     }
 
