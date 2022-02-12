@@ -763,7 +763,6 @@ impl DdAgentClient {
     }
 
     fn send(&self, stack: Vec<Span>) {
-        println!("Send Channel size: {}", self.client_sender.len());
         self.client_sender.send(stack).unwrap_or_else(|_| {
             println!("Tracing send error: Channel closed!");
         });
@@ -776,10 +775,8 @@ impl DdAgentClient {
         service: String,
         apm_config: ApmConfig,
     ) {
-        println!("Starting client sender loop");
         // Loop as long as the channel is open
         while let Ok(stack) = client_requests.recv() {
-            println!("Recv Channel size: {}", client_requests.len());
             let count = stack.len();
             let spans: Vec<Vec<RawSpan>> = vec![stack
                 .into_iter()
