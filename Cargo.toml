@@ -10,6 +10,7 @@ repository = "https://github.com/kitsuneninetails/datadog-apm-rust-sync"
 
 [dependencies]
 chrono = "0.4.19"
+crossbeam-channel = "0.5.2"
 filter-logger = "0.3.0"
 futures = "0.3"
 lazy_static = "1.4.0"
