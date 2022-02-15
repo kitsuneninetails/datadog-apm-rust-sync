@@ -3,7 +3,7 @@ use crate::{api::RawSpan, model::Span};
 use attohttpc;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use lazy_static::lazy_static;
-use log::{error, trace, warn, Level as LogLevel, Log, Record};
+use log::{warn, Level as LogLevel, Log, Record};
 use rand::Rng;
 use serde_json::to_string;
 use std::borrow::BorrowMut;
@@ -33,6 +33,8 @@ pub struct Config {
     pub apm_config: ApmConfig,
     /// Turn on tracing
     pub enable_tracing: bool,
+    /// Number of threads to send the HTTP messages to the Datadog agent
+    pub num_client_send_threads: u32,
 }
 
 impl Default for Config {
@@ -45,6 +47,7 @@ impl Default for Config {
             logging_config: None,
             apm_config: ApmConfig::default(),
             enable_tracing: false,
+            num_client_send_threads: 4,
         }
     }
 }
@@ -333,24 +336,16 @@ fn trace_server_loop(
     buffer_receiver: mpsc::Receiver<TraceCommand>,
     log_config: Option<LoggingConfig>,
 ) {
-    let storage = RwLock::new(SpanStorage::new());
+    let mut storage = SpanStorage::new();
 
     loop {
-        let client = client.clone();
-
         match buffer_receiver.recv() {
             Ok(TraceCommand::Log(record)) => {
                 if let Some(ref lc) = log_config {
                     let skip = record
                         .module
                         .as_ref()
-                        .map(|m| {
-                            lc.mod_filter
-                                .iter()
-                                .filter(|f| m.contains(*f))
-                                .next()
-                                .is_some()
-                        })
+                        .map(|m: &String| lc.mod_filter.contains(&m.as_str()))
                         .unwrap_or(false);
                     let body_skip = lc
                         .body_filter
@@ -360,15 +355,9 @@ fn trace_server_loop(
                         .is_some();
                     if !skip && !body_skip {
                         match storage
-                            .read()
-                            .unwrap()
                             .get_trace_id_for_thread(record.thread_id)
                             .and_then(|tr_id| {
-                                storage
-                                    .read()
-                                    .unwrap()
-                                    .current_span_id(tr_id)
-                                    .map(|sp_id| (tr_id, sp_id))
+                                storage.current_span_id(tr_id).map(|sp_id| (tr_id, sp_id))
                             }) {
                             Some((tr, sp)) => {
                                 // Both trace and span are active on this thread
@@ -397,8 +386,7 @@ fn trace_server_loop(
                 }
             }
             Ok(TraceCommand::NewSpan(_nanos, data)) => {
-                trace!("NEW SPAN: {:?}", data);
-                storage.write().unwrap().start_span(Span {
+                storage.start_span(Span {
                     id: data.id,
                     trace_id: data.trace_id,
                     tags: HashMap::new(),
@@ -411,15 +399,12 @@ fn trace_server_loop(
                 });
             }
             Ok(TraceCommand::Enter(_nanos, thread_id, span_id)) => {
-                trace!("ENTER SPAN: {}/{}", thread_id, span_id);
-                storage.write().unwrap().enter_span(thread_id, span_id);
+                storage.enter_span(thread_id, span_id);
             }
             Ok(TraceCommand::Exit(_nanos, span_id)) => {
-                trace!("EXIT SPAN: {}", span_id);
-                storage.write().unwrap().exit_span(span_id);
+                storage.exit_span(span_id);
             }
             Ok(TraceCommand::Event(_nanos, thread_id, mut event, time)) => {
-                trace!("EVENT: {:?}", event);
                 // Events are only valid if the trace_id flag is set
                 // Send trace specified the trace to send, so use that instead of the thread's
                 // current trace.
@@ -427,40 +412,30 @@ fn trace_server_loop(
                     .remove("send_trace")
                     .and_then(|t| t.parse::<u64>().ok())
                 {
-                    let send_vec = storage
-                        .write()
-                        .unwrap()
-                        .drain_completed(send_trace_id, time);
+                    let send_vec = storage.drain_completed(send_trace_id, time);
                     // Thread has ended this trace.  Until it enters a new span, it
                     // is not in a trace.
-                    storage.write().unwrap().remove_current_trace(send_trace_id);
-                    trace!("Pulling trace for ID: {}=[{:?}]", send_trace_id, send_vec);
+                    storage.remove_current_trace(send_trace_id);
                     if !send_vec.is_empty() {
                         client.send(send_vec);
                     }
                 }
                 // Tag events only work inside a trace, so get the trace from the thread.
                 // No trace means no tagging.
-                let trace_id_opt = storage.read().unwrap().get_trace_id_for_thread(thread_id);
+                let trace_id_opt = storage.get_trace_id_for_thread(thread_id);
                 if let Some(trace_id) = trace_id_opt {
                     if let Some(type_event) = event.remove("error.etype") {
-                        storage.write().unwrap().span_record_tag(
-                            trace_id,
-                            "error.type".to_string(),
-                            type_event,
-                        )
+                        storage.span_record_tag(trace_id, "error.type".to_string(), type_event)
                     }
-                    event.into_iter().for_each(|(k, v)| {
-                        storage.write().unwrap().span_record_tag(trace_id, k, v)
-                    });
+                    event
+                        .into_iter()
+                        .for_each(|(k, v)| storage.span_record_tag(trace_id, k, v));
                 }
             }
             Ok(TraceCommand::CloseSpan(nanos, span_id)) => {
-                trace!("CLOSE SPAN: {}", span_id);
-                storage.write().unwrap().end_span(nanos, span_id);
+                storage.end_span(nanos, span_id);
             }
             Err(_) => {
-                warn!("Tracing channel disconnected, exiting");
                 return;
             }
         }
@@ -479,13 +454,7 @@ impl DatadogTracing {
     pub fn new(config: Config) -> DatadogTracing {
         let (buffer_sender, buffer_receiver) = mpsc::channel();
         let sample_rate = config.apm_config.sample_rate;
-
-        let client = DdAgentClient {
-            env: config.env,
-            service: config.service,
-            endpoint: format!("http://{}:{}/v0.3/traces", config.host, config.port),
-            apm_config: config.apm_config,
-        };
+        let client = DdAgentClient::new(&config);
 
         let log_config = config.logging_config.clone();
         std::thread::spawn(move || trace_server_loop(client, buffer_receiver, log_config));
@@ -766,36 +735,69 @@ impl Log for DatadogTracing {
 
 #[derive(Debug, Clone)]
 struct DdAgentClient {
-    env: Option<String>,
-    endpoint: String,
-    service: String,
-    apm_config: ApmConfig,
+    client_sender: crossbeam_channel::Sender<Vec<Span>>,
 }
 
 impl DdAgentClient {
-    fn send(self, stack: Vec<Span>) {
-        trace!("Sending spans: {:?}", stack);
-        let count = stack.len();
-        let spans: Vec<Vec<RawSpan>> = vec![stack
-            .into_iter()
-            .map(|s| RawSpan::from_span(&s, &self.service, &self.env, &self.apm_config))
-            .collect()];
-        match to_string(&spans) {
-            Err(e) => warn!("Couldn't encode payload for datadog: {:?}", e),
-            Ok(payload) => {
-                trace!("Sending to localhost agent payload: {:?}", payload);
-                let req = attohttpc::post(&self.endpoint)
-                    .header("Content-Length", payload.len() as u64)
-                    .header("Content-Type", "application/json")
-                    .header("X-Datadog-Trace-Count", count)
-                    .text(&payload);
+    fn new(config: &Config) -> Self {
+        let (client_sender, client_requests) = crossbeam_channel::unbounded();
 
-                match req.send() {
-                    Ok(resp) if resp.is_success() => {
-                        trace!("Sent to localhost agent: {:?}", resp)
+        for _ in 0..config.num_client_send_threads {
+            let env = config.env.clone();
+            let service = config.service.clone();
+            let host = config.host.clone();
+            let port = config.port.clone();
+            let apm_config = config.apm_config.clone();
+            let cr_channel = client_requests.clone();
+            std::thread::spawn(move || {
+                DdAgentClient::thread_loop(
+                    cr_channel,
+                    env,
+                    format!("http://{}:{}/v0.3/traces", host, port),
+                    service,
+                    apm_config,
+                )
+            });
+        }
+        DdAgentClient { client_sender }
+    }
+
+    fn send(&self, stack: Vec<Span>) {
+        self.client_sender.send(stack).unwrap_or_else(|_| {
+            println!("Tracing send error: Channel closed!");
+        });
+    }
+
+    fn thread_loop(
+        client_requests: crossbeam_channel::Receiver<Vec<Span>>,
+        env: Option<String>,
+        endpoint: String,
+        service: String,
+        apm_config: ApmConfig,
+    ) {
+        // Loop as long as the channel is open
+        while let Ok(stack) = client_requests.recv() {
+            let count = stack.len();
+            let spans: Vec<Vec<RawSpan>> = vec![stack
+                .into_iter()
+                .map(|s| RawSpan::from_span(&s, &service, &env, &apm_config))
+                .collect()];
+            match to_string(&spans) {
+                Err(e) => println!("Couldn't encode payload for datadog: {:?}", e),
+                Ok(payload) => {
+                    let req = attohttpc::post(&endpoint)
+                        .header("Content-Length", payload.len() as u64)
+                        .header("Content-Type", "application/json")
+                        .header("X-Datadog-Trace-Count", count)
+                        .text(&payload);
+
+                    match req.send() {
+                        Ok(resp) if !resp.is_success() => {
+                            println!("error from datadog agent: {:?}", resp)
+                        }
+                        Err(err) => println!("error sending traces to datadog: {:?}", err),
+                        _ => {}
                     }
-                    Ok(resp) => error!("error from datadog agent: {:?}", resp),
-                    Err(err) => error!("error sending traces to datadog: {:?}", err),
                 }
             }
         }
