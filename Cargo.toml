@@ -1,6 +1,6 @@
 [package]
 name = "datadog-apm-sync"
-version = "0.4.5"
+version = "0.5.0"
 authors = ["Michael Micucci <9975355+kitsuneninetails@users.noreply.github.com>", "Fernando Gonçalves <fernando.goncalves@pipefy.com> (original base code)"]
 edition = "2018"
 license = "MIT"
