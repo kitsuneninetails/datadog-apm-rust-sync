@@ -345,7 +345,7 @@ fn trace_server_loop(
                     let skip = record
                         .module
                         .as_ref()
-                        .map(|m: &String| lc.mod_filter.contains(&m.as_str()))
+                        .map(|m: &String| lc.mod_filter.iter().any(|filter| m.contains(*filter)))
                         .unwrap_or(false);
                     let body_skip = lc
                         .body_filter
