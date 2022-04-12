@@ -154,10 +154,12 @@ impl SpanCollection {
     fn end_span(&mut self, nanos: u64, span_id: SpanId) {
         let pos = self.current_spans.iter().rposition(|i| i.id == span_id);
         if let Some(i) = pos {
-            if let Some(span) = self.current_spans.remove(i) { self.completed_spans.push(Span {
-                duration: Duration::nanoseconds(nanos as i64 - span.start.timestamp_nanos()),
-                ..span
-            }) }
+            if let Some(span) = self.current_spans.remove(i) {
+                self.completed_spans.push(Span {
+                    duration: Duration::nanoseconds(nanos as i64 - span.start.timestamp_nanos()),
+                    ..span
+                })
+            }
         }
     }
 
@@ -180,7 +182,9 @@ impl SpanCollection {
     }
 
     fn add_tag(&mut self, k: String, v: String) {
-        if let Some(span) = self.current_spans.back_mut() { span.tags.insert(k.clone(), v.clone()); }
+        if let Some(span) = self.current_spans.back_mut() {
+            span.tags.insert(k.clone(), v.clone());
+        }
         self.parent_span.tags.insert(k, v);
     }
 
@@ -343,10 +347,7 @@ fn trace_server_loop(
                         .as_ref()
                         .map(|m: &String| lc.mod_filter.iter().any(|filter| m.contains(*filter)))
                         .unwrap_or(false);
-                    let body_skip = lc
-                        .body_filter
-                        .iter()
-                        .any(|f| record.msg_str.contains(f));
+                    let body_skip = lc.body_filter.iter().any(|f| record.msg_str.contains(f));
                     if !skip && !body_skip {
                         match storage
                             .get_trace_id_for_thread(record.thread_id)
@@ -719,7 +720,7 @@ impl Log for DatadogTracing {
                     module: record.module_path().map(|s| s.to_string()),
                     msg_str,
                 };
-                self.send_log(log_rec).unwrap_or( ());
+                self.send_log(log_rec).unwrap_or(());
             }
         }
     }

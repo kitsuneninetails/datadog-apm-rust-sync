@@ -57,12 +57,7 @@ pub struct RawSpan {
 }
 
 impl RawSpan {
-    pub fn from_span(
-        span: &Span,
-        service: &str,
-        env: &Option<String>,
-        cfg: &ApmConfig,
-    ) -> RawSpan {
+    pub fn from_span(span: &Span, service: &str, env: &Option<String>, cfg: &ApmConfig) -> RawSpan {
         let http_enabled = span.tags.contains_key("http.url");
         let is_error = span.tags.contains_key("error.message");
         RawSpan {
