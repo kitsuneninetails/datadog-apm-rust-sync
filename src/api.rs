@@ -65,6 +65,7 @@ impl RawSpan {
     ) -> RawSpan {
         let http_enabled = span.tags.contains_key("http.url");
         let is_error = span.tags.contains_key("error.message");
+        let span_duration = span.duration.whole_nanoseconds();
         RawSpan {
             service: service.clone(),
             trace_id: span.trace_id,
@@ -73,7 +74,7 @@ impl RawSpan {
             resource: span.resource.clone(),
             parent_id: span.parent_id,
             start: span.start.unix_timestamp_nanos() as u64,
-            duration: span.duration.whole_nanoseconds() as u64,
+            duration: if span_duration > u64::MAX as i128 { 0 } else { span_duration as u64 },
             error: if is_error { 1 } else { 0 },
             r#type: if http_enabled { "custom" } else { "web" }.to_string(),
             meta: fill_meta(&span, env.clone()),
