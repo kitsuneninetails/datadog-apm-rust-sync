@@ -1,5 +1,5 @@
-use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
+use time::{Duration, OffsetDateTime};
 
 #[derive(Debug, Clone)]
 pub struct Span {
@@ -8,7 +8,7 @@ pub struct Span {
     pub name: String,
     pub resource: String,
     pub parent_id: Option<u64>,
-    pub start: DateTime<Utc>,
+    pub start: OffsetDateTime,
     pub duration: Duration,
     pub sql: Option<SqlInfo>,
     pub tags: HashMap<String, String>,

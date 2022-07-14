@@ -1,7 +1,6 @@
 use crate::{api::RawSpan, model::Span};
 
 use attohttpc;
-use chrono::{DateTime, Duration, TimeZone, Utc};
 use lazy_static::lazy_static;
 use log::{warn, Level as LogLevel, Log, Record};
 use rand::Rng;
@@ -15,6 +14,7 @@ use std::{
         mpsc, RwLock,
     },
 };
+use time::{Duration, OffsetDateTime};
 
 /// Configuration settings for the client.
 #[derive(Clone, Debug)]
@@ -64,7 +64,7 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         LoggingConfig {
             level: LogLevel::Info,
-            time_format: "%Y-%m-%d %H:%M:%S%z".to_string(),
+            time_format: "[year]-[month]-[day] [hour]:[minute]:[second][offset_hour sign:mandatory][offset_minute]".to_string(),
             mod_filter: Vec::new(),
             body_filter: Vec::new(),
         }
@@ -97,7 +97,7 @@ type SpanId = u64;
 struct LogRecord {
     pub thread_id: ThreadId,
     pub level: log::Level,
-    pub time: DateTime<Utc>,
+    pub time: OffsetDateTime,
     pub msg_str: String,
     pub module: Option<String>,
 }
@@ -113,7 +113,7 @@ enum TraceCommand {
         TimeInNanos,
         ThreadId,
         HashMap<String, String>,
-        DateTime<Utc>,
+        OffsetDateTime,
     ),
 }
 
@@ -123,7 +123,7 @@ struct NewSpanData {
     pub id: SpanId,
     pub name: String,
     pub resource: String,
-    pub start: DateTime<Utc>,
+    pub start: OffsetDateTime,
 }
 
 #[derive(Clone, Debug)]
@@ -156,7 +156,9 @@ impl SpanCollection {
         if let Some(i) = pos {
             self.current_spans.remove(i).map(|span| {
                 self.completed_spans.push(Span {
-                    duration: Duration::nanoseconds(nanos as i64 - span.start.timestamp_nanos()),
+                    duration: Duration::nanoseconds(
+                        nanos as i64 - span.start.unix_timestamp_nanos() as i64,
+                    ),
                     ..span
                 })
             });
@@ -195,16 +197,16 @@ impl SpanCollection {
             .into_iter()
             .for_each(|span| {
                 self.completed_spans.push(Span {
-                    duration: Utc::now().signed_duration_since(span.start),
+                    duration: OffsetDateTime::now_utc() - span.start,
                     ..span
                 })
             });
         self
     }
 
-    fn drain(self, end_time: DateTime<Utc>) -> Vec<Span> {
+    fn drain(self, end_time: OffsetDateTime) -> Vec<Span> {
         let parent_span = Span {
-            duration: end_time.signed_duration_since(self.parent_span.start.clone()),
+            duration: end_time - self.parent_span.start.clone(),
             ..self.parent_span.clone()
         };
         let mut ret = self
@@ -244,7 +246,7 @@ impl SpanStorage {
         if let Some(ss) = self.traces.get_mut(&trace_id) {
             ss.start_span(span);
         } else {
-            let parent_span_id = Utc::now().timestamp_nanos() as u64 + 1;
+            let parent_span_id = OffsetDateTime::now_utc().unix_timestamp_nanos() as u64 + 1;
             let parent_span = Span {
                 id: parent_span_id,
                 parent_id: None,
@@ -294,7 +296,7 @@ impl SpanStorage {
     /// Drain the span collection for this trace so we can send the trace through to Datadog,
     /// This effectively ends the trace.  Any new spans on this trace ID will have the same
     /// trace ID, but have a new parent span (and a new trace line in Datadog).
-    fn drain_completed(&mut self, trace_id: TraceId, end: DateTime<Utc>) -> Vec<Span> {
+    fn drain_completed(&mut self, trace_id: TraceId, end: OffsetDateTime) -> Vec<Span> {
         if let Some(ss) = self.traces.remove(&trace_id) {
             ss.drain(end)
         } else {
@@ -354,6 +356,11 @@ fn trace_server_loop(
                         .next()
                         .is_some();
                     if !skip && !body_skip {
+                        let formatted_time =
+                            time::format_description::parse(lc.time_format.as_ref())
+                                .map_err(|_| time::error::Format::InvalidComponent(""))
+                                .and_then(|format| record.time.format(&format))
+                                .unwrap_or(record.time.to_string());
                         match storage
                             .get_trace_id_for_thread(record.thread_id)
                             .and_then(|tr_id| {
@@ -363,7 +370,7 @@ fn trace_server_loop(
                                 // Both trace and span are active on this thread
                                 println!(
                                     "{time} {level} [trace-id:{traceid} span-id:{spanid}] [{module}] {body}",
-                                    time = record.time.format(lc.time_format.as_ref()),
+                                    time = formatted_time,
                                     traceid = tr,
                                     spanid = sp,
                                     level = record.level,
@@ -375,7 +382,7 @@ fn trace_server_loop(
                                 // Both trace and span are not active on this thread
                                 println!(
                                     "{time} {level} [{module}] {body}",
-                                    time = record.time.format(lc.time_format.as_ref()),
+                                    time = formatted_time,
                                     level = record.level,
                                     module = record.module.unwrap_or("-".to_string()),
                                     body = record.msg_str
@@ -537,7 +544,7 @@ impl DatadogTracing {
         nanos: u64,
         thread_id: ThreadId,
         event: HashMap<String, String>,
-        time: DateTime<Utc>,
+        time: OffsetDateTime,
     ) -> Result<(), ()> {
         self.buffer_sender
             .clone()
@@ -593,11 +600,11 @@ pub fn set_current_span_id(new_id: Option<SpanId>) {
 //
 // This will hold up to the year 10,000 before it cycles.
 pub fn create_unique_id64() -> u64 {
-    let now = Utc::now();
-    let baseline = Utc.timestamp(0, 0);
+    let now = OffsetDateTime::now_utc();
 
     let millis_since_epoch: u64 =
-        (now.signed_duration_since(baseline).num_milliseconds() << 16) as u64;
+        ((now - OffsetDateTime::UNIX_EPOCH).whole_milliseconds() << 16) as u64;
+    // (now.signed_duration_since(baseline).num_milliseconds() << 16) as u64;
     let rand: u8 = rand::thread_rng().gen_range(0, 255u8);
     millis_since_epoch
         + ((rand as u64) << 8)
@@ -647,19 +654,19 @@ impl tracing::Subscriber for DatadogTracing {
     }
 
     fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        let nanos = Utc::now().timestamp_nanos() as u64;
+        let nanos = OffsetDateTime::now_utc().unix_timestamp_nanos() as u64;
         let mut new_span_visitor = HashMapVisitor::new();
         span.record(&mut new_span_visitor);
         let trace_id = new_span_visitor
             .fields
             .remove("trace_id")
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(Utc::now().timestamp_nanos() as u64);
-        let span_id = Utc::now().timestamp_nanos() as u64 + 1;
+            .unwrap_or(OffsetDateTime::now_utc().unix_timestamp_nanos() as u64);
+        let span_id = OffsetDateTime::now_utc().unix_timestamp_nanos() as u64 + 1;
         let new_span = NewSpanData {
             id: span_id,
             trace_id,
-            start: Utc::now(),
+            start: OffsetDateTime::now_utc(),
             resource: span.metadata().target().to_string(),
             name: span.metadata().name().to_string(),
         };
@@ -672,17 +679,22 @@ impl tracing::Subscriber for DatadogTracing {
     fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
 
     fn event(&self, event: &tracing::Event<'_>) {
-        let nanos = Utc::now().timestamp_nanos() as u64;
+        let nanos = OffsetDateTime::now_utc().unix_timestamp_nanos() as u64;
         let thread_id = get_thread_id();
         let mut new_evt_visitor = HashMapVisitor::new();
         event.record(&mut new_evt_visitor);
 
-        self.send_event(nanos, thread_id, new_evt_visitor.fields, Utc::now())
-            .unwrap_or(());
+        self.send_event(
+            nanos,
+            thread_id,
+            new_evt_visitor.fields,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap_or(());
     }
 
     fn enter(&self, span: &tracing::span::Id) {
-        let nanos = Utc::now().timestamp_nanos() as u64;
+        let nanos = OffsetDateTime::now_utc().unix_timestamp_nanos() as u64;
         let thread_id = get_thread_id();
         self.send_enter_span(nanos, thread_id, span.clone().into_u64())
             .unwrap_or(());
@@ -690,14 +702,14 @@ impl tracing::Subscriber for DatadogTracing {
     }
 
     fn exit(&self, span: &tracing::span::Id) {
-        let nanos = Utc::now().timestamp_nanos() as u64;
+        let nanos = OffsetDateTime::now_utc().unix_timestamp_nanos() as u64;
         self.send_exit_span(nanos, span.clone().into_u64())
             .unwrap_or(());
         set_current_span_id(None);
     }
 
     fn try_close(&self, span: tracing::span::Id) -> bool {
-        let nanos = Utc::now().timestamp_nanos() as u64;
+        let nanos = OffsetDateTime::now_utc().unix_timestamp_nanos() as u64;
         self.send_close_span(nanos, span.into_u64()).unwrap_or(());
         false
     }
@@ -716,7 +728,7 @@ impl Log for DatadogTracing {
         if let Some(ref lc) = self.log_config {
             if record.level() <= lc.level {
                 let thread_id = get_thread_id();
-                let now = chrono::Utc::now();
+                let now = OffsetDateTime::now_utc();
                 let msg_str = format!("{}", record.args());
                 let log_rec = LogRecord {
                     thread_id,
