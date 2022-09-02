@@ -19,7 +19,7 @@ Add to your `Cargo.toml`:
 ```toml
 tracing = "0.1"
 tracing-futures = "*"
-datadog-apm-sync = {version = "0.2", git = "http://github.com/kitsuneninetails/datadog-apm-rust-sync"}
+datadog-apm-sync = {version = "0.5.1", git = "http://github.com/kitsuneninetails/datadog-apm-rust-sync"}
 ```
 
 In your Rust code, instantiate a DatadogTracer:
