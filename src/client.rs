@@ -275,7 +275,9 @@ impl SpanStorage {
         if let Some(trace_id) = t_id {
             if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
                 ss.enter_span(span_id);
-                self.set_current_trace(thread_id, trace_id);
+                if ss.entered_spans.len() == 1 {
+                    self.set_current_trace(thread_id, trace_id);
+                }
             }
         }
     }
@@ -286,8 +288,10 @@ impl SpanStorage {
         if let Some(trace_id) = trace_id {
             if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
                 ss.exit_span(span_id);
+                if ss.entered_spans.is_empty() {
+                    self.remove_current_trace(trace_id);
+                }
             }
-            self.remove_current_trace(trace_id);
         }
     }
 
