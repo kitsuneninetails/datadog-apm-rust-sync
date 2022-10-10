@@ -189,9 +189,7 @@ impl SpanCollection {
     }
 
     fn drain_current(mut self) -> Self {
-        self.current_spans
-            .drain(..)
-            .collect::<Vec<Span>>()
+        std::mem::take(&mut self.current_spans)
             .into_iter()
             .for_each(|span| {
                 self.completed_spans.push(Span {
@@ -207,11 +205,7 @@ impl SpanCollection {
             duration: end_time.signed_duration_since(self.parent_span.start.clone()),
             ..self.parent_span.clone()
         };
-        let mut ret = self
-            .drain_current()
-            .completed_spans
-            .drain(..)
-            .collect::<Vec<Span>>();
+        let mut ret = self.drain_current().completed_spans;
         ret.push(parent_span);
         ret
     }
