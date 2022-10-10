@@ -946,6 +946,27 @@ mod tests {
     }
 
     #[test]
+    fn test_exit_child_span() {
+        trace_config();
+        let trace_id = 1u64;
+
+        let f1 = std::thread::spawn(move || {
+            let span = span!(tracing::Level::INFO, "parent_span", trace_id = trace_id);
+            let _e = span.enter();
+            info!("Inside parent_span, should print trace and span ID");
+            {
+                let span = span!(tracing::Level::INFO, "child_span", trace_id = trace_id);
+                let _e = span.enter();
+                info!("Inside child_span, should print trace and span ID");
+            }
+            info!("Back in parent_span, should print trace and span ID");
+        });
+        f1.join().unwrap();
+        event!(tracing::Level::INFO, send_trace = trace_id);
+        ::std::thread::sleep(::std::time::Duration::from_millis(1000));
+    }
+
+    #[test]
     fn test_trace_one_func_stack() {
         let trace_id = create_unique_id64();
         trace_config();
