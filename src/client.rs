@@ -269,7 +269,9 @@ impl SpanStorage {
         if let Some(trace_id) = t_id {
             if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
                 ss.enter_span(span_id);
-                self.set_current_trace(thread_id, trace_id);
+                if ss.entered_spans.len() == 1 {
+                    self.set_current_trace(thread_id, trace_id);
+                }
             }
         }
     }
@@ -280,8 +282,10 @@ impl SpanStorage {
         if let Some(trace_id) = trace_id {
             if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
                 ss.exit_span(span_id);
+                if ss.entered_spans.is_empty() {
+                    self.remove_current_trace(trace_id);
+                }
             }
-            self.remove_current_trace(trace_id);
         }
     }
 
@@ -933,6 +937,27 @@ mod tests {
             ..Default::default()
         };
         let _client = DatadogTracing::new(config);
+    }
+
+    #[test]
+    fn test_exit_child_span() {
+        trace_config();
+        let trace_id = 1u64;
+
+        let f1 = std::thread::spawn(move || {
+            let span = span!(tracing::Level::INFO, "parent_span", trace_id = trace_id);
+            let _e = span.enter();
+            info!("Inside parent_span, should print trace and span ID");
+            {
+                let span = span!(tracing::Level::INFO, "child_span", trace_id = trace_id);
+                let _e = span.enter();
+                info!("Inside child_span, should print trace and span ID");
+            }
+            info!("Back in parent_span, should print trace and span ID");
+        });
+        f1.join().unwrap();
+        event!(tracing::Level::INFO, send_trace = trace_id);
+        ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 
     #[test]
