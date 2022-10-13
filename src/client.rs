@@ -596,7 +596,7 @@ pub fn create_unique_id64() -> u64 {
 
     let millis_since_epoch: u64 =
         (now.signed_duration_since(baseline).num_milliseconds() << 16) as u64;
-    let rand: u8 = rand::thread_rng().gen_range(0, 255u8);
+    let rand: u8 = rand::thread_rng().gen_range(0..255u8);
     millis_since_epoch
         + ((rand as u64) << 8)
         + UNIQUEID_COUNTER.fetch_add(1, Ordering::Relaxed) as u64
