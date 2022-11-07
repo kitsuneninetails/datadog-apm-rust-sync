@@ -109,12 +109,7 @@ enum TraceCommand {
     Enter(TimeInNanos, ThreadId, SpanId),
     Exit(TimeInNanos, SpanId),
     CloseSpan(TimeInNanos, SpanId),
-    Event(
-        TimeInNanos,
-        ThreadId,
-        HashMap<String, String>,
-        DateTime<Utc>,
-    ),
+    Event(TimeInNanos, ThreadId, HashMap<String, String>),
 }
 
 #[derive(Debug, Clone)]
@@ -144,13 +139,19 @@ impl SpanCollection {
         }
     }
 
+    // Returns true if the root span has ended and the trace is ready to be sent
+    // to datadog.
+    fn has_completed(&self) -> bool {
+        self.current_spans.is_empty()
+    }
+
     // Open a span by inserting the span into the "current" span map by ID.
     fn start_span(&mut self, span: Span) {
         let parent_id = Some(self.current_span_id().unwrap_or(self.parent_span.id));
         self.current_spans.push(Span { parent_id, ..span });
     }
 
-    // Move span to "completed" based on ID.
+    // Move span to "completed"
     fn end_span(&mut self, nanos: u64) {
         if let Some(span) = self.current_spans.pop() {
             self.completed_spans.push(Span {
@@ -247,13 +248,20 @@ impl SpanStorage {
         }
     }
 
-    /// End a span and update the current "top of the stack"
-    fn end_span(&mut self, nanos: u64, span_id: SpanId) {
-        if let Some(trace_id) = self.spans_to_trace_id.remove(&span_id) {
-            if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
-                ss.end_span(nanos);
-            }
-        }
+    /// End a span and update the current "top of the stack".
+    /// Remove the trace and return the spans if the root span has completed.
+    fn end_span(&mut self, nanos: u64, span_id: SpanId) -> Option<Vec<Span>> {
+        self.spans_to_trace_id
+            .remove(&span_id)
+            .and_then(|trace_id| {
+                if let Some(ss) = self.traces.get_mut(&trace_id) {
+                    ss.end_span(nanos);
+                    ss.has_completed()
+                        .then(|| self.drain_completed(trace_id, Utc::now()))
+                } else {
+                    None
+                }
+            })
     }
 
     /// Enter a span for trace, and keep track so that new spans get the correct parent.
@@ -287,6 +295,7 @@ impl SpanStorage {
     /// This effectively ends the trace.  Any new spans on this trace ID will have the same
     /// trace ID, but have a new parent span (and a new trace line in Datadog).
     fn drain_completed(&mut self, trace_id: TraceId, end: DateTime<Utc>) -> Vec<Span> {
+        self.remove_current_trace(trace_id);
         if let Some(ss) = self.traces.remove(&trace_id) {
             ss.drain(end)
         } else {
@@ -396,22 +405,7 @@ fn trace_server_loop(
             Ok(TraceCommand::Exit(_nanos, span_id)) => {
                 storage.exit_span(span_id);
             }
-            Ok(TraceCommand::Event(_nanos, thread_id, mut event, time)) => {
-                // Events are only valid if the trace_id flag is set
-                // Send trace specified the trace to send, so use that instead of the thread's
-                // current trace.
-                if let Some(send_trace_id) = event
-                    .remove("send_trace")
-                    .and_then(|t| t.parse::<u64>().ok())
-                {
-                    let send_vec = storage.drain_completed(send_trace_id, time);
-                    // Thread has ended this trace.  Until it enters a new span, it
-                    // is not in a trace.
-                    storage.remove_current_trace(send_trace_id);
-                    if !send_vec.is_empty() {
-                        client.send(send_vec);
-                    }
-                }
+            Ok(TraceCommand::Event(_nanos, thread_id, mut event)) => {
                 // Tag events only work inside a trace, so get the trace from the thread.
                 // No trace means no tagging.
                 let trace_id_opt = storage.get_trace_id_for_thread(thread_id);
@@ -425,7 +419,9 @@ fn trace_server_loop(
                 }
             }
             Ok(TraceCommand::CloseSpan(nanos, span_id)) => {
-                storage.end_span(nanos, span_id);
+                if let Some(spans) = storage.end_span(nanos, span_id) {
+                    client.send(spans);
+                };
             }
             Err(_) => {
                 return;
@@ -529,11 +525,10 @@ impl DatadogTracing {
         nanos: u64,
         thread_id: ThreadId,
         event: HashMap<String, String>,
-        time: DateTime<Utc>,
     ) -> Result<(), ()> {
         self.buffer_sender
             .clone()
-            .send(TraceCommand::Event(nanos, thread_id, event, time))
+            .send(TraceCommand::Event(nanos, thread_id, event))
             .map(|_| ())
             .map_err(|_| ())
     }
@@ -669,7 +664,7 @@ impl tracing::Subscriber for DatadogTracing {
         let mut new_evt_visitor = HashMapVisitor::new();
         event.record(&mut new_evt_visitor);
 
-        self.send_event(nanos, thread_id, new_evt_visitor.fields, Utc::now())
+        self.send_event(nanos, thread_id, new_evt_visitor.fields)
             .unwrap_or(());
     }
 
@@ -856,7 +851,6 @@ mod tests {
             http.status_code = "200",
             http.method = "GET"
         );
-        event!(tracing::Level::INFO, send_trace = trace_id);
     }
 
     fn traced_error_func(trace_id: u64) {
@@ -882,12 +876,6 @@ mod tests {
             http.url = "http://test.test/",
             http.status_code = "400",
             http.method = "GET"
-        );
-        event!(
-            tracing::Level::ERROR,
-            custom_tag = "good",
-            custom_tag2 = "test",
-            send_trace = trace_id
         );
     }
 
@@ -924,7 +912,7 @@ mod tests {
             env: Some("staging-01".into()),
             logging_config: Some(LoggingConfig {
                 level: Level::Trace,
-                mod_filter: vec!["hyper", "mime"],
+                mod_filter: vec!["hyper", "mime", "reqwest", "mio"],
                 ..LoggingConfig::default()
             }),
             enable_tracing: true,
@@ -950,7 +938,6 @@ mod tests {
             info!("Back in parent_span, should print trace and span ID");
         });
         f1.join().unwrap();
-        event!(tracing::Level::INFO, send_trace = trace_id);
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
     }
 
@@ -970,7 +957,6 @@ mod tests {
 
         let f1 = std::thread::spawn(move || {
             traced_func_no_send(trace_id);
-            event!(tracing::Level::INFO, send_trace = trace_id);
         });
 
         debug!(
@@ -988,11 +974,9 @@ mod tests {
         trace_config();
         let f1 = std::thread::spawn(move || {
             traced_func_no_send(trace_id1);
-            event!(tracing::Level::INFO, send_trace = trace_id1);
         });
         let f2 = std::thread::spawn(move || {
             traced_func_no_send(trace_id2);
-            event!(tracing::Level::INFO, send_trace = trace_id2);
         });
 
         f1.join().unwrap();
@@ -1015,43 +999,33 @@ mod tests {
         trace_config();
         let f1 = std::thread::spawn(move || {
             traced_func_no_send(trace_id1);
-            event!(tracing::Level::INFO, send_trace = trace_id1);
         });
         let f2 = std::thread::spawn(move || {
             traced_func_no_send(trace_id2);
-            event!(tracing::Level::INFO, send_trace = trace_id2);
         });
         let f3 = std::thread::spawn(move || {
             traced_func_no_send(trace_id3);
-            event!(tracing::Level::INFO, send_trace = trace_id3);
         });
         let f4 = std::thread::spawn(move || {
             traced_func_no_send(trace_id4);
-            event!(tracing::Level::INFO, send_trace = trace_id4);
         });
         let f5 = std::thread::spawn(move || {
             traced_func_no_send(trace_id5);
-            event!(tracing::Level::INFO, send_trace = trace_id5);
         });
         let f6 = std::thread::spawn(move || {
             traced_func_no_send(trace_id6);
-            event!(tracing::Level::INFO, send_trace = trace_id6);
         });
         let f7 = std::thread::spawn(move || {
             traced_func_no_send(trace_id7);
-            event!(tracing::Level::INFO, send_trace = trace_id7);
         });
         let f8 = std::thread::spawn(move || {
             traced_func_no_send(trace_id8);
-            event!(tracing::Level::INFO, send_trace = trace_id8);
         });
         let f9 = std::thread::spawn(move || {
             traced_func_no_send(trace_id9);
-            event!(tracing::Level::INFO, send_trace = trace_id9);
         });
         let f10 = std::thread::spawn(move || {
             traced_func_no_send(trace_id10);
-            event!(tracing::Level::INFO, send_trace = trace_id10);
         });
         f1.join().unwrap();
         f2.join().unwrap();
@@ -1097,7 +1071,6 @@ mod tests {
             traced_func_no_send(trace_id);
             traced_func_no_send(trace_id);
             // Send both funcs under one parent span and one trace
-            event!(tracing::Level::INFO, send_trace = trace_id);
         });
         f5.join().unwrap();
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
@@ -1110,10 +1083,8 @@ mod tests {
         trace_config();
         let f7 = std::thread::spawn(move || {
             traced_func_no_send(trace_id1);
-            event!(tracing::Level::INFO, send_trace = trace_id1);
 
             traced_func_no_send(trace_id2);
-            event!(tracing::Level::INFO, send_trace = trace_id2);
         });
         f7.join().unwrap();
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));

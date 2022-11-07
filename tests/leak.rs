@@ -1,6 +1,6 @@
 use datadog_apm_sync::{Config, DatadogTracing, LoggingConfig};
 use log::warn;
-use tracing::{event, span};
+use tracing::span;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
@@ -23,7 +23,6 @@ async fn test_leak() {
             let rate_limit = false; //(i % 100_000) > 99_900;
             leak(i, rate_limit).await.unwrap();
             leak(i, rate_limit).await.unwrap();
-            event!(tracing::Level::INFO, send_trace = i);
         }
     });
     f1.await.unwrap();
