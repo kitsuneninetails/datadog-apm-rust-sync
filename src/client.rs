@@ -9,7 +9,7 @@ use serde_json::to_string;
 use std::borrow::BorrowMut;
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicU32, AtomicU8, Ordering},
         mpsc, RwLock,
@@ -125,8 +125,8 @@ struct NewSpanData {
 struct SpanCollection {
     completed_spans: Vec<Span>,
     parent_span: Span,
-    current_spans: Vec<Span>,
-    entered_spans: Vec<u64>,
+    current_spans: VecDeque<Span>,
+    entered_spans: VecDeque<u64>,
 }
 
 impl SpanCollection {
@@ -134,8 +134,8 @@ impl SpanCollection {
         SpanCollection {
             completed_spans: vec![],
             parent_span,
-            current_spans: vec![],
-            entered_spans: vec![],
+            current_spans: VecDeque::new(),
+            entered_spans: VecDeque::new(),
         }
     }
 
@@ -148,38 +148,44 @@ impl SpanCollection {
     // Open a span by inserting the span into the "current" span map by ID.
     fn start_span(&mut self, span: Span) {
         let parent_id = Some(self.current_span_id().unwrap_or(self.parent_span.id));
-        self.current_spans.push(Span { parent_id, ..span });
+        self.current_spans.push_back(Span { parent_id, ..span });
     }
 
-    // Move span to "completed"
-    fn end_span(&mut self, nanos: u64) {
-        if let Some(span) = self.current_spans.pop() {
-            self.completed_spans.push(Span {
-                duration: Duration::nanoseconds(nanos as i64 - span.start.timestamp_nanos()),
-                ..span
-            })
+    // Move span to "completed" based on ID.
+    fn end_span(&mut self, nanos: u64, span_id: SpanId) {
+        let pos = self.current_spans.iter().rposition(|i| i.id == span_id);
+        if let Some(i) = pos {
+            self.current_spans.remove(i).map(|span| {
+                self.completed_spans.push(Span {
+                    duration: Duration::nanoseconds(nanos as i64 - span.start.timestamp_nanos()),
+                    ..span
+                })
+            });
         }
     }
 
     // Enter a span (mark it on stack)
     fn enter_span(&mut self, span_id: SpanId) {
-        self.entered_spans.push(span_id);
+        self.entered_spans.push_back(span_id);
     }
 
     // Exit a span (pop from stack)
-    fn exit_span(&mut self) {
-        self.entered_spans.pop();
+    fn exit_span(&mut self, span_id: SpanId) {
+        let pos = self.entered_spans.iter().rposition(|i| *i == span_id);
+        if let Some(i) = pos {
+            self.entered_spans.remove(i);
+        }
     }
 
     /// Get the id, if present, of the most current span for this trace
     fn current_span_id(&self) -> Option<u64> {
-        self.entered_spans.last().copied()
+        self.entered_spans.back().map(|i| *i)
     }
 
     fn add_tag(&mut self, k: String, v: String) {
-        if let Some(span) = self.current_spans.last_mut() {
+        self.current_spans.back_mut().map(|span| {
             span.tags.insert(k.clone(), v.clone());
-        }
+        });
         self.parent_span.tags.insert(k, v);
     }
 
@@ -255,7 +261,7 @@ impl SpanStorage {
             .remove(&span_id)
             .and_then(|trace_id| {
                 if let Some(ss) = self.traces.get_mut(&trace_id) {
-                    ss.end_span(nanos);
+                    ss.end_span(nanos, span_id);
                     ss.has_completed()
                         .then(|| self.drain_completed(trace_id, Utc::now()))
                 } else {
@@ -283,7 +289,7 @@ impl SpanStorage {
         let trace_id = self.spans_to_trace_id.get(&span_id).cloned();
         if let Some(trace_id) = trace_id {
             if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
-                ss.exit_span();
+                ss.exit_span(span_id);
                 if ss.entered_spans.is_empty() {
                     self.remove_current_trace(trace_id);
                 }
