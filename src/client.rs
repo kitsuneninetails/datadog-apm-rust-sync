@@ -189,26 +189,10 @@ impl SpanCollection {
         self.parent_span.tags.insert(k, v);
     }
 
-    fn drain_current(mut self) -> Self {
-        std::mem::take(&mut self.current_spans)
-            .into_iter()
-            .for_each(|span| {
-                self.completed_spans.push(Span {
-                    duration: Utc::now().signed_duration_since(span.start),
-                    ..span
-                })
-            });
-        self
-    }
-
-    fn drain(self, end_time: DateTime<Utc>) -> Vec<Span> {
-        let parent_span = Span {
-            duration: end_time.signed_duration_since(self.parent_span.start.clone()),
-            ..self.parent_span.clone()
-        };
-        let mut ret = self.drain_current().completed_spans;
-        ret.push(parent_span);
-        ret
+    fn drain(mut self, end_time: DateTime<Utc>) -> Vec<Span> {
+        self.parent_span.duration = end_time.signed_duration_since(self.parent_span.start);
+        self.completed_spans.push(self.parent_span);
+        self.completed_spans
     }
 }
 
