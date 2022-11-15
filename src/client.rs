@@ -24,7 +24,7 @@ pub struct Config {
     pub env: Option<String>,
     /// Datadog agent host/ip, defaults to `localhost`.
     pub host: String,
-    /// Datadog agent port, defaults to `8196`.
+    /// Datadog agent port, defaults to `8126`.
     pub port: String,
     /// Optional Logging Config to also set this tracer as the main logger
     pub logging_config: Option<LoggingConfig>,
