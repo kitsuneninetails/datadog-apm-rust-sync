@@ -4,14 +4,13 @@ use attohttpc;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use lazy_static::lazy_static;
 use log::{warn, Level as LogLevel, Log, Record};
-use rand::Rng;
 use serde_json::to_string;
 use std::borrow::BorrowMut;
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicU32, AtomicU8, Ordering},
+        atomic::{AtomicU16, AtomicU32, Ordering},
         mpsc, RwLock,
     },
 };
@@ -557,7 +556,7 @@ fn log_level_to_trace_level(level: log::Level) -> tracing::Level {
 }
 
 lazy_static! {
-    static ref UNIQUEID_COUNTER: AtomicU8 = AtomicU8::new(0);
+    static ref UNIQUEID_COUNTER: AtomicU16 = AtomicU16::new(0);
     static ref THREAD_COUNTER: AtomicU32 = AtomicU32::new(0);
 }
 
@@ -596,10 +595,7 @@ pub fn create_unique_id64() -> u64 {
 
     let millis_since_epoch: u64 =
         (now.signed_duration_since(baseline).num_milliseconds() << 16) as u64;
-    let rand: u8 = rand::thread_rng().gen_range(0..255u8);
-    millis_since_epoch
-        + ((rand as u64) << 8)
-        + UNIQUEID_COUNTER.fetch_add(1, Ordering::Relaxed) as u64
+    millis_since_epoch + UNIQUEID_COUNTER.fetch_add(1, Ordering::Relaxed) as u64
 }
 
 pub struct HashMapVisitor {
