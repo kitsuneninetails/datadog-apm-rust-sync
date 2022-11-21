@@ -153,12 +153,12 @@ impl SpanCollection {
     fn end_span(&mut self, nanos: u64, span_id: SpanId) {
         let pos = self.current_spans.iter().rposition(|i| i.id == span_id);
         if let Some(i) = pos {
-            self.current_spans.remove(i).map(|span| {
+            if let Some(span) = self.current_spans.remove(i) {
                 self.completed_spans.push(Span {
                     duration: Duration::nanoseconds(nanos as i64 - span.start.timestamp_nanos()),
                     ..span
                 })
-            });
+            }
         }
     }
 
@@ -177,13 +177,13 @@ impl SpanCollection {
 
     /// Get the id, if present, of the most current span for this trace
     fn current_span_id(&self) -> Option<u64> {
-        self.entered_spans.back().map(|i| *i)
+        self.entered_spans.back().copied()
     }
 
     fn add_tag(&mut self, k: String, v: String) {
-        self.current_spans.back_mut().map(|span| {
+        if let Some(span) = self.current_spans.back_mut() {
             span.tags.insert(k.clone(), v.clone());
-        });
+        }
         self.parent_span.tags.insert(k, v);
     }
 
@@ -201,7 +201,7 @@ impl SpanCollection {
 
     fn drain(self, end_time: DateTime<Utc>) -> Vec<Span> {
         let parent_span = Span {
-            duration: end_time.signed_duration_since(self.parent_span.start.clone()),
+            duration: end_time.signed_duration_since(self.parent_span.start),
             ..self.parent_span.clone()
         };
         let mut ret = self.drain_current().completed_spans;
@@ -264,7 +264,7 @@ impl SpanStorage {
     /// Enter a span for trace, and keep track so that new spans get the correct parent.
     /// Keep track of which trace the current thread is in (for logging and events)
     fn enter_span(&mut self, thread_id: ThreadId, span_id: SpanId) {
-        let t_id = self.spans_to_trace_id.get(&span_id).map(|i| *i);
+        let t_id = self.spans_to_trace_id.get(&span_id).copied();
         if let Some(trace_id) = t_id {
             if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
                 ss.enter_span(span_id);
@@ -307,7 +307,7 @@ impl SpanStorage {
     }
 
     fn get_trace_id_for_thread(&self, thread_id: ThreadId) -> Option<u64> {
-        self.current_trace_for_thread.get(&thread_id).map(|i| *i)
+        self.current_trace_for_thread.get(&thread_id).copied()
     }
 
     fn set_current_trace(&mut self, thread_id: ThreadId, trace_id: TraceId) {
@@ -344,12 +344,7 @@ fn trace_server_loop(
                         .as_ref()
                         .map(|m: &String| lc.mod_filter.iter().any(|filter| m.contains(*filter)))
                         .unwrap_or(false);
-                    let body_skip = lc
-                        .body_filter
-                        .iter()
-                        .filter(|f| record.msg_str.contains(*f))
-                        .next()
-                        .is_some();
+                    let body_skip = lc.body_filter.iter().any(|f| record.msg_str.contains(f));
                     if !skip && !body_skip {
                         match storage
                             .get_trace_id_for_thread(record.thread_id)
@@ -364,7 +359,7 @@ fn trace_server_loop(
                                     traceid = tr,
                                     spanid = sp,
                                     level = record.level,
-                                    module = record.module.unwrap_or("-".to_string()),
+                                    module = record.module.unwrap_or_else(|| "-".to_string()),
                                     body = record.msg_str
                                 );
                             }
@@ -374,7 +369,7 @@ fn trace_server_loop(
                                     "{time} {level} [{module}] {body}",
                                     time = record.time.format(lc.time_format.as_ref()),
                                     level = record.level,
-                                    module = record.module.unwrap_or("-".to_string()),
+                                    module = record.module.unwrap_or_else(|| "-".to_string()),
                                     body = record.msg_str
                                 );
                             }
@@ -486,7 +481,7 @@ impl DatadogTracing {
     }
 
     pub fn get_global_sampling_rate() -> f64 {
-        unsafe { SAMPLING_RATE.clone().unwrap_or(0f64) }
+        unsafe { SAMPLING_RATE.unwrap_or(0f64) }
     }
 
     fn send_log(&self, record: LogRecord) -> Result<(), ()> {
@@ -616,7 +611,7 @@ impl HashMapVisitor {
 
 impl tracing::field::Visit for HashMapVisitor {
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.add_value(field, format!("{}", value));
+        self.add_value(field, value.to_string());
     }
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
         self.add_value(field, format!("{}", value));
@@ -719,7 +714,7 @@ impl Log for DatadogTracing {
                     module: record.module_path().map(|s| s.to_string()),
                     msg_str,
                 };
-                self.send_log(log_rec).unwrap_or_else(|_| ());
+                self.send_log(log_rec).unwrap_or(());
             }
         }
     }
