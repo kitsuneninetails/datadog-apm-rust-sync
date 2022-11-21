@@ -153,13 +153,15 @@ impl SpanCollection {
 
     // Move span to "completed" based on ID.
     fn end_span(&mut self, nanos: u64, span_id: SpanId) {
-        let pos = self.current_spans.iter().rposition(|i| i.id == span_id);
-        if let Some(i) = pos {
-            self.current_spans.remove(i).map(|span| {
-                self.completed_spans.push(Span {
-                    duration: Duration::nanoseconds(nanos as i64 - span.start.timestamp_nanos()),
-                    ..span
-                })
+        if let Some(span) = self
+            .current_spans
+            .iter()
+            .rposition(|i| i.id == span_id)
+            .and_then(|index| self.current_spans.remove(index))
+        {
+            self.completed_spans.push(Span {
+                duration: Duration::nanoseconds(nanos as i64 - span.start.timestamp_nanos()),
+                ..span
             });
         }
     }
@@ -179,7 +181,7 @@ impl SpanCollection {
 
     /// Get the id, if present, of the most current span for this trace
     fn current_span_id(&self) -> Option<u64> {
-        self.entered_spans.back().map(|i| *i)
+        self.entered_spans.back().copied()
     }
 
     fn add_tag(&mut self, k: String, v: String) {
@@ -257,7 +259,7 @@ impl SpanStorage {
     /// Enter a span for trace, and keep track so that new spans get the correct parent.
     /// Keep track of which trace the current thread is in (for logging and events)
     fn enter_span(&mut self, thread_id: ThreadId, span_id: SpanId) {
-        let t_id = self.spans_to_trace_id.get(&span_id).map(|i| *i);
+        let t_id = self.spans_to_trace_id.get(&span_id).copied();
         if let Some(trace_id) = t_id {
             if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
                 ss.enter_span(span_id);
