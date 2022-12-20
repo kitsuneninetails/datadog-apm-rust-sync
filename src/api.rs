@@ -75,7 +75,7 @@ impl RawSpan {
             start: span.start.timestamp_nanos() as u64,
             duration: span.duration.num_nanoseconds().unwrap_or(0) as u64,
             error: if is_error { 1 } else { 0 },
-            r#type: if http_enabled { "custom" } else { "web" }.to_string(),
+            r#type: if http_enabled { "web" } else { "custom" }.to_string(),
             meta: fill_meta(&span, env.clone()),
             metrics: fill_metrics(cfg),
         }
