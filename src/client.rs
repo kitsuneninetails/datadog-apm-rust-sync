@@ -215,8 +215,7 @@ impl SpanStorage {
 
     // Either start a new trace with the span's trace ID (if there is no span already
     // pushed for that trace ID), or push the span on the "current" stack of spans for that
-    // trace ID.  If "parent" is true, that means we need a parent span pushed for this to
-    // represent the entire trace.
+    // trace ID.
     fn start_span(&mut self, span: Span) {
         let trace_id = span.trace_id;
         self.spans_to_trace_id.insert(span.id, span.trace_id);
@@ -225,7 +224,6 @@ impl SpanStorage {
         } else {
             let mut new_ss = SpanCollection::new();
             new_ss.start_span(span);
-
             self.traces.insert(trace_id, new_ss);
         }
     }
