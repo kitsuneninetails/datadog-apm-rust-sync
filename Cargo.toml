@@ -9,7 +9,7 @@ description = "Datadog APM-compatible tracer and logger for Rust"
 repository = "https://github.com/kitsuneninetails/datadog-apm-rust-sync"
 
 [dependencies]
-chrono = "0.4.19"
+chrono = {version = "0.4.26", default-features = false, features = ["clock"] }
 crossbeam-channel = "0.5.6"
 lazy_static = "1.4.0"
 log = {version = "0.4", features = ["std"] }
