@@ -5,13 +5,12 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use lazy_static::lazy_static;
 use log::{warn, Level as LogLevel, Log, Record};
 use serde_json::to_string;
-use std::borrow::BorrowMut;
 use std::{
-    cell::RefCell,
+    cell::Cell,
     collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicU16, AtomicU32, Ordering},
-        mpsc, RwLock,
+        mpsc,
     },
 };
 
@@ -564,7 +563,7 @@ static mut SAMPLING_RATE: Option<f64> = None;
 
 thread_local! {
     static THREAD_ID: ThreadId = THREAD_COUNTER.fetch_add(1, Ordering::Relaxed);
-    static CURRENT_SPAN_ID: RwLock<RefCell<Option<SpanId>>> = RwLock::new(RefCell::new(None));
+    static CURRENT_SPAN_ID: Cell<Option<SpanId>> = Cell::new(None);
 }
 
 pub fn get_thread_id() -> ThreadId {
@@ -572,12 +571,12 @@ pub fn get_thread_id() -> ThreadId {
 }
 
 pub fn get_current_span_id() -> Option<SpanId> {
-    CURRENT_SPAN_ID.with(|id| *id.read().unwrap().borrow())
+    CURRENT_SPAN_ID.with(|id| id.get())
 }
 
 pub fn set_current_span_id(new_id: Option<SpanId>) {
     CURRENT_SPAN_ID.with(|id| {
-        id.write().unwrap().borrow_mut().replace(new_id);
+        id.set(new_id);
     })
 }
 
