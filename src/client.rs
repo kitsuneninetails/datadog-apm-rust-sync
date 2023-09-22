@@ -107,12 +107,7 @@ enum TraceCommand {
     Enter(TimeInNanos, ThreadId, SpanId),
     Exit(TimeInNanos, SpanId),
     CloseSpan(TimeInNanos, SpanId),
-    Event(
-        TimeInNanos,
-        ThreadId,
-        HashMap<String, String>,
-        DateTime<Utc>,
-    ),
+    Event(TimeInNanos, ThreadId, HashMap<String, String>),
 }
 
 #[derive(Debug, Clone)]
@@ -127,16 +122,14 @@ struct NewSpanData {
 #[derive(Clone, Debug)]
 struct SpanCollection {
     completed_spans: Vec<Span>,
-    parent_span: Span,
     current_spans: VecDeque<Span>,
     entered_spans: VecDeque<u64>,
 }
 
 impl SpanCollection {
-    fn new(parent_span: Span) -> Self {
+    fn new() -> Self {
         SpanCollection {
             completed_spans: vec![],
-            parent_span,
             current_spans: VecDeque::new(),
             entered_spans: VecDeque::new(),
         }
@@ -144,7 +137,7 @@ impl SpanCollection {
 
     // Open a span by inserting the span into the "current" span map by ID.
     fn start_span(&mut self, span: Span) {
-        let parent_id = Some(self.current_span_id().unwrap_or(self.parent_span.id));
+        let parent_id = self.current_span_id();
         self.current_spans.push_back(Span { parent_id, ..span });
     }
 
@@ -180,10 +173,9 @@ impl SpanCollection {
     }
 
     fn add_tag(&mut self, k: String, v: String) {
-        self.current_spans.back_mut().map(|span| {
-            span.tags.insert(k.clone(), v.clone());
-        });
-        self.parent_span.tags.insert(k, v);
+        if let Some(span) = self.current_spans.back_mut() {
+            span.tags.insert(k, v);
+        }
     }
 
     fn drain_current(mut self) -> Self {
@@ -198,14 +190,8 @@ impl SpanCollection {
         self
     }
 
-    fn drain(self, end_time: DateTime<Utc>) -> Vec<Span> {
-        let parent_span = Span {
-            duration: end_time.signed_duration_since(self.parent_span.start.clone()),
-            ..self.parent_span.clone()
-        };
-        let mut ret = self.drain_current().completed_spans;
-        ret.push(parent_span);
-        ret
+    fn drain(self) -> Vec<Span> {
+        self.drain_current().completed_spans
     }
 }
 
@@ -228,25 +214,15 @@ impl SpanStorage {
 
     // Either start a new trace with the span's trace ID (if there is no span already
     // pushed for that trace ID), or push the span on the "current" stack of spans for that
-    // trace ID.  If "parent" is true, that means we need a parent span pushed for this to
-    // represent the entire trace.
+    // trace ID.
     fn start_span(&mut self, span: Span) {
         let trace_id = span.trace_id;
         self.spans_to_trace_id.insert(span.id, span.trace_id);
         if let Some(ss) = self.traces.get_mut(&trace_id) {
             ss.start_span(span);
         } else {
-            let parent_span_id = Utc::now().timestamp_nanos() as u64 + 1;
-            let parent_span = Span {
-                id: parent_span_id,
-                parent_id: None,
-                name: format!("{}-traceparent", trace_id),
-                ..span.clone()
-            };
-
-            let mut new_ss = SpanCollection::new(parent_span);
+            let mut new_ss = SpanCollection::new();
             new_ss.start_span(span);
-
             self.traces.insert(trace_id, new_ss);
         }
     }
@@ -290,9 +266,9 @@ impl SpanStorage {
     /// Drain the span collection for this trace so we can send the trace through to Datadog,
     /// This effectively ends the trace.  Any new spans on this trace ID will have the same
     /// trace ID, but have a new parent span (and a new trace line in Datadog).
-    fn drain_completed(&mut self, trace_id: TraceId, end: DateTime<Utc>) -> Vec<Span> {
+    fn drain_completed(&mut self, trace_id: TraceId) -> Vec<Span> {
         if let Some(ss) = self.traces.remove(&trace_id) {
-            ss.drain(end)
+            ss.drain()
         } else {
             vec![]
         }
@@ -400,7 +376,7 @@ fn trace_server_loop(
             Ok(TraceCommand::Exit(_nanos, span_id)) => {
                 storage.exit_span(span_id);
             }
-            Ok(TraceCommand::Event(_nanos, thread_id, mut event, time)) => {
+            Ok(TraceCommand::Event(_nanos, thread_id, mut event)) => {
                 // Events are only valid if the trace_id flag is set
                 // Send trace specified the trace to send, so use that instead of the thread's
                 // current trace.
@@ -408,7 +384,7 @@ fn trace_server_loop(
                     .remove("send_trace")
                     .and_then(|t| t.parse::<u64>().ok())
                 {
-                    let send_vec = storage.drain_completed(send_trace_id, time);
+                    let send_vec = storage.drain_completed(send_trace_id);
                     // Thread has ended this trace.  Until it enters a new span, it
                     // is not in a trace.
                     storage.remove_current_trace(send_trace_id);
@@ -533,11 +509,10 @@ impl DatadogTracing {
         nanos: u64,
         thread_id: ThreadId,
         event: HashMap<String, String>,
-        time: DateTime<Utc>,
     ) -> Result<(), ()> {
         self.buffer_sender
             .clone()
-            .send(TraceCommand::Event(nanos, thread_id, event, time))
+            .send(TraceCommand::Event(nanos, thread_id, event))
             .map(|_| ())
             .map_err(|_| ())
     }
@@ -670,7 +645,7 @@ impl tracing::Subscriber for DatadogTracing {
         let mut new_evt_visitor = HashMapVisitor::new();
         event.record(&mut new_evt_visitor);
 
-        self.send_event(nanos, thread_id, new_evt_visitor.fields, Utc::now())
+        self.send_event(nanos, thread_id, new_evt_visitor.fields)
             .unwrap_or(());
     }
 
