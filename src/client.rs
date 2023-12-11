@@ -2,7 +2,6 @@ use crate::{api::RawSpan, model::Span};
 
 use attohttpc;
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use lazy_static::lazy_static;
 use log::{warn, Level as LogLevel, Log, Record};
 use serde_json::to_string;
 use std::{
@@ -554,10 +553,8 @@ fn log_level_to_trace_level(level: log::Level) -> tracing::Level {
     }
 }
 
-lazy_static! {
-    static ref UNIQUEID_COUNTER: AtomicU16 = AtomicU16::new(0);
-    static ref THREAD_COUNTER: AtomicU32 = AtomicU32::new(0);
-}
+static UNIQUEID_COUNTER: AtomicU16 = AtomicU16::new(0);
+static THREAD_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 static mut SAMPLING_RATE: Option<f64> = None;
 
