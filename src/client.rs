@@ -489,7 +489,6 @@ impl DatadogTracing {
 
     fn send_log(&self, record: LogRecord) -> Result<(), ()> {
         self.buffer_sender
-            .clone()
             .send(TraceCommand::Log(record))
             .map(|_| ())
             .map_err(|_| ())
@@ -497,7 +496,6 @@ impl DatadogTracing {
 
     fn send_new_span(&self, nanos: u64, span: NewSpanData) -> Result<(), ()> {
         self.buffer_sender
-            .clone()
             .send(TraceCommand::NewSpan(nanos, span))
             .map(|_| ())
             .map_err(|_| ())
@@ -505,7 +503,6 @@ impl DatadogTracing {
 
     fn send_enter_span(&self, nanos: u64, thread_id: ThreadId, id: SpanId) -> Result<(), ()> {
         self.buffer_sender
-            .clone()
             .send(TraceCommand::Enter(nanos, thread_id, id))
             .map(|_| ())
             .map_err(|_| ())
@@ -513,7 +510,6 @@ impl DatadogTracing {
 
     fn send_exit_span(&self, nanos: u64, id: SpanId) -> Result<(), ()> {
         self.buffer_sender
-            .clone()
             .send(TraceCommand::Exit(nanos, id))
             .map(|_| ())
             .map_err(|_| ())
@@ -521,7 +517,6 @@ impl DatadogTracing {
 
     fn send_close_span(&self, nanos: u64, span_id: SpanId) -> Result<(), ()> {
         self.buffer_sender
-            .clone()
             .send(TraceCommand::CloseSpan(nanos, span_id))
             .map(|_| ())
             .map_err(|_| ())
@@ -535,7 +530,6 @@ impl DatadogTracing {
         time: DateTime<Utc>,
     ) -> Result<(), ()> {
         self.buffer_sender
-            .clone()
             .send(TraceCommand::Event(nanos, thread_id, event, time))
             .map(|_| ())
             .map_err(|_| ())
