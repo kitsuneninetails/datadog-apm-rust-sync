@@ -232,21 +232,11 @@ impl SpanStorage {
     fn start_span(&mut self, span: Span) {
         let trace_id = span.trace_id;
         self.spans_to_trace_id.insert(span.id, span.trace_id);
+
         if let Some(ss) = self.traces.get_mut(&trace_id) {
             ss.start_span(span);
         } else {
-            let parent_span_id = Utc::now().timestamp_nanos() as u64 + 1;
-            let parent_span = Span {
-                id: parent_span_id,
-                parent_id: None,
-                name: format!("{}-traceparent", trace_id),
-                ..span.clone()
-            };
-
-            let mut new_ss = SpanCollection::new(parent_span);
-            new_ss.start_span(span);
-
-            self.traces.insert(trace_id, new_ss);
+            self.traces.insert(trace_id, SpanCollection::new(span));
         }
     }
 
