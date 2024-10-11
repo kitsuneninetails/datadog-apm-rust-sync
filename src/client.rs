@@ -232,6 +232,7 @@ impl SpanStorage {
     fn start_span(&mut self, span: Span) {
         let trace_id = span.trace_id;
         self.spans_to_trace_id.insert(span.id, span.trace_id);
+
         if let Some(ss) = self.traces.get_mut(&trace_id) {
             ss.start_span(span);
         } else {
