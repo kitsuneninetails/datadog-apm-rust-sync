@@ -1,6 +1,6 @@
 [package]
 name = "datadog-apm-sync"
-version = "0.6.2"
+version = "0.7.0"
 authors = ["Michael Micucci <9975355+kitsuneninetails@users.noreply.github.com>", "Fernando Gonçalves <fernando.goncalves@pipefy.com> (original base code)"]
 edition = "2018"
 license = "MIT"
@@ -19,3 +19,6 @@ tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
+
+[features]
+json = ["log/kv", "log/kv_serde"]
