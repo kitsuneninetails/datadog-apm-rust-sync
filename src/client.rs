@@ -13,6 +13,9 @@ use std::{
     },
 };
 
+#[cfg(feature = "json")]
+use log::kv;
+
 /// Configuration settings for the client.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -97,6 +100,8 @@ struct LogRecord {
     pub time: DateTime<Utc>,
     pub msg_str: String,
     pub module: Option<String>,
+    #[cfg(feature = "json")]
+    pub key_values: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -345,6 +350,7 @@ fn trace_server_loop(
                             }) {
                             Some((tr, sp)) => {
                                 // Both trace and span are active on this thread
+                                let log_body = build_log_body(&record);
                                 println!(
                                     "{time} {level} [trace-id:{traceid} span-id:{spanid}] [{module}] {body}",
                                     time = record.time.format(lc.time_format.as_ref()),
@@ -352,17 +358,18 @@ fn trace_server_loop(
                                     spanid = sp,
                                     level = record.level,
                                     module = record.module.unwrap_or("-".to_string()),
-                                    body = record.msg_str
+                                    body = log_body
                                 );
                             }
                             _ => {
+                                let log_body = build_log_body(&record);
                                 // Both trace and span are not active on this thread
                                 println!(
                                     "{time} {level} [{module}] {body}",
                                     time = record.time.format(lc.time_format.as_ref()),
                                     level = record.level,
                                     module = record.module.unwrap_or("-".to_string()),
-                                    body = record.msg_str
+                                    body = log_body
                                 );
                             }
                         }
@@ -422,6 +429,26 @@ fn trace_server_loop(
             Err(_) => {
                 return;
             }
+        }
+    }
+}
+
+fn build_log_body(record: &LogRecord) -> String {
+    #[cfg(not(feature = "json"))]
+    {
+        record.msg_str.clone()
+    }
+    #[cfg(feature = "json")]
+    {
+        if record.key_values.is_empty() {
+            record.msg_str.clone()
+        } else {
+            let mut body = HashMap::new();
+            body.insert("message".to_string(), record.msg_str.clone());
+            for (k, v) in &record.key_values {
+                body.insert(k.clone(), v.clone());
+            }
+            serde_json::to_string(&body).unwrap_or_else(|_| "".to_string())
         }
     }
 }
@@ -676,6 +703,28 @@ impl tracing::Subscriber for DatadogTracing {
     }
 }
 
+#[cfg(feature = "json")]
+struct KeyValueMap(HashMap<String, String>);
+
+#[cfg(feature = "json")]
+impl<'kvs> kv::VisitSource<'kvs> for KeyValueMap {
+    fn visit_pair(&mut self, key: kv::Key<'kvs>, value: kv::Value<'kvs>) -> Result<(), kv::Error> {
+        self.0.insert(key.to_string(), value.to_string());
+        Ok(())
+    }
+}
+
+#[cfg(feature = "json")]
+fn build_key_value_map<'a>(record: &Record<'a>) -> HashMap<String, String> {
+    let mut visitor = KeyValueMap(HashMap::new());
+    let visit_result = record.key_values().visit(&mut visitor);
+    if let Err(e) = visit_result {
+        println!("Error building key value map: {:?}", e);
+    }
+
+    visitor.0
+}
+
 impl Log for DatadogTracing {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
         if let Some(ref lc) = self.log_config {
@@ -687,6 +736,8 @@ impl Log for DatadogTracing {
 
     fn log(&self, record: &Record) {
         if let Some(ref lc) = self.log_config {
+            #[cfg(feature = "json")]
+            let key_values = build_key_value_map(record);
             if record.level() <= lc.level {
                 let thread_id = get_thread_id();
                 let now = chrono::Utc::now();
@@ -697,6 +748,8 @@ impl Log for DatadogTracing {
                     time: now,
                     module: record.module_path().map(|s| s.to_string()),
                     msg_str,
+                    #[cfg(feature = "json")]
+                    key_values,
                 };
                 self.send_log(log_rec).unwrap_or_else(|_| ());
             }
