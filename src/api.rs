@@ -72,7 +72,7 @@ impl RawSpan {
             name: span.name.clone(),
             resource: span.resource.clone(),
             parent_id: span.parent_id,
-            start: span.start.timestamp_nanos() as u64,
+            start: span.start.timestamp_nanos_opt().unwrap_or(0) as u64,
             duration: span.duration.num_nanoseconds().unwrap_or(0) as u64,
             error: if is_error { 1 } else { 0 },
             r#type: if http_enabled { "web" } else { "custom" }.to_string(),

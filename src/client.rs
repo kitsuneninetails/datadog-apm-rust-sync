@@ -1,7 +1,8 @@
 use crate::{api::RawSpan, model::Span};
 
+use atomic_float::AtomicF64;
 use attohttpc;
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use chrono::{DateTime, Duration, Utc};
 use log::{warn, Level as LogLevel, Log, Record};
 use serde_json::to_string;
 use std::{
@@ -158,7 +159,9 @@ impl SpanCollection {
         if let Some(i) = pos {
             self.current_spans.remove(i).map(|span| {
                 self.completed_spans.push(Span {
-                    duration: Duration::nanoseconds(nanos as i64 - span.start.timestamp_nanos()),
+                    duration: Duration::nanoseconds(
+                        nanos as i64 - span.start.timestamp_nanos_opt().unwrap_or(0),
+                    ),
                     ..span
                 })
             });
@@ -494,11 +497,7 @@ impl DatadogTracing {
             // Only set the global sample rate once when the tracer is set as the global tracer.
             // This must be marked unsafe because we are overwriting a global, but it only gets done
             // once in a process's lifetime.
-            unsafe {
-                if SAMPLING_RATE.is_none() {
-                    SAMPLING_RATE = Some(sample_rate);
-                }
-            }
+            SAMPLING_RATE.store(sample_rate, Ordering::Release);
 
             tracing::subscriber::set_global_default(tracer.clone()).unwrap_or_else(|_| {
                 warn!(
@@ -511,7 +510,7 @@ impl DatadogTracing {
     }
 
     pub fn get_global_sampling_rate() -> f64 {
-        unsafe { SAMPLING_RATE.clone().unwrap_or(0f64) }
+        SAMPLING_RATE.load(Ordering::Acquire)
     }
 
     fn send_log(&self, record: LogRecord) -> Result<(), ()> {
@@ -577,7 +576,7 @@ fn log_level_to_trace_level(level: log::Level) -> tracing::Level {
 static UNIQUEID_COUNTER: AtomicU16 = AtomicU16::new(0);
 static THREAD_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-static mut SAMPLING_RATE: Option<f64> = None;
+static SAMPLING_RATE: AtomicF64 = AtomicF64::new(0.0);
 
 thread_local! {
     static THREAD_ID: ThreadId = THREAD_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -607,11 +606,7 @@ pub fn set_current_span_id(new_id: Option<SpanId>) {
 //
 // This will hold up to the year 10,000 before it cycles.
 pub fn create_unique_id64() -> u64 {
-    let now = Utc::now();
-    let baseline = Utc.timestamp(0, 0);
-
-    let millis_since_epoch: u64 =
-        (now.signed_duration_since(baseline).num_milliseconds() << 16) as u64;
+    let millis_since_epoch = (Utc::now().timestamp_millis() << 16) as u64;
     millis_since_epoch + UNIQUEID_COUNTER.fetch_add(1, Ordering::Relaxed) as u64
 }
 
@@ -658,15 +653,15 @@ impl tracing::Subscriber for DatadogTracing {
     }
 
     fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        let nanos = Utc::now().timestamp_nanos() as u64;
+        let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
         let mut new_span_visitor = HashMapVisitor::new();
         span.record(&mut new_span_visitor);
         let trace_id = new_span_visitor
             .fields
             .remove("trace_id")
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(Utc::now().timestamp_nanos() as u64);
-        let span_id = Utc::now().timestamp_nanos() as u64 + 1;
+            .unwrap_or(Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64);
+        let span_id = Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64 + 1;
         let new_span = NewSpanData {
             id: span_id,
             trace_id,
@@ -683,7 +678,7 @@ impl tracing::Subscriber for DatadogTracing {
     fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
 
     fn event(&self, event: &tracing::Event<'_>) {
-        let nanos = Utc::now().timestamp_nanos() as u64;
+        let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
         let thread_id = get_thread_id();
         let mut new_evt_visitor = HashMapVisitor::new();
         event.record(&mut new_evt_visitor);
@@ -693,7 +688,7 @@ impl tracing::Subscriber for DatadogTracing {
     }
 
     fn enter(&self, span: &tracing::span::Id) {
-        let nanos = Utc::now().timestamp_nanos() as u64;
+        let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
         let thread_id = get_thread_id();
         self.send_enter_span(nanos, thread_id, span.clone().into_u64())
             .unwrap_or(());
@@ -701,14 +696,14 @@ impl tracing::Subscriber for DatadogTracing {
     }
 
     fn exit(&self, span: &tracing::span::Id) {
-        let nanos = Utc::now().timestamp_nanos() as u64;
+        let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
         self.send_exit_span(nanos, span.clone().into_u64())
             .unwrap_or(());
         set_current_span_id(None);
     }
 
     fn try_close(&self, span: tracing::span::Id) -> bool {
-        let nanos = Utc::now().timestamp_nanos() as u64;
+        let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
         self.send_close_span(nanos, span.into_u64()).unwrap_or(());
         false
     }
