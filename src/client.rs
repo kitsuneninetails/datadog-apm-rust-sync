@@ -320,6 +320,56 @@ impl SpanStorage {
     }
 }
 
+fn filter_log(storage: &SpanStorage, log_config: &LoggingConfig, record: &LogRecord) {
+    let skip = record
+        .module
+        .as_ref()
+        .map(|m: &String| {
+            log_config
+                .mod_filter
+                .iter()
+                .any(|filter| m.contains(*filter))
+        })
+        .unwrap_or(false);
+    let body_skip = log_config
+        .body_filter
+        .iter()
+        .filter(|f| record.msg_str.contains(*f))
+        .next()
+        .is_some();
+    if !skip && !body_skip {
+        match storage
+            .get_trace_id_for_thread(record.thread_id)
+            .and_then(|tr_id| storage.current_span_id(tr_id).map(|sp_id| (tr_id, sp_id)))
+        {
+            Some((tr, sp)) => {
+                // Both trace and span are active on this thread
+                let log_body = build_log_body(&record);
+                println!(
+                    "{time} {level} [trace-id:{traceid} span-id:{spanid}] [{module}] {body}",
+                    time = record.time.format(log_config.time_format.as_ref()),
+                    traceid = tr,
+                    spanid = sp,
+                    level = record.level,
+                    module = record.module.clone().unwrap_or("-".to_string()),
+                    body = log_body
+                );
+            }
+            _ => {
+                let log_body = build_log_body(&record);
+                // Both trace and span are not active on this thread
+                println!(
+                    "{time} {level} [{module}] {body}",
+                    time = record.time.format(log_config.time_format.as_ref()),
+                    level = record.level,
+                    module = record.module.clone().unwrap_or("-".to_string()),
+                    body = log_body
+                );
+            }
+        }
+    }
+}
+
 fn trace_server_loop(
     client: DdAgentClient,
     buffer_receiver: mpsc::Receiver<TraceCommand>,
@@ -330,51 +380,9 @@ fn trace_server_loop(
     loop {
         match buffer_receiver.recv() {
             Ok(TraceCommand::Log(record)) => {
-                if let Some(ref lc) = log_config {
-                    let skip = record
-                        .module
-                        .as_ref()
-                        .map(|m: &String| lc.mod_filter.iter().any(|filter| m.contains(*filter)))
-                        .unwrap_or(false);
-                    let body_skip = lc
-                        .body_filter
-                        .iter()
-                        .filter(|f| record.msg_str.contains(*f))
-                        .next()
-                        .is_some();
-                    if !skip && !body_skip {
-                        match storage
-                            .get_trace_id_for_thread(record.thread_id)
-                            .and_then(|tr_id| {
-                                storage.current_span_id(tr_id).map(|sp_id| (tr_id, sp_id))
-                            }) {
-                            Some((tr, sp)) => {
-                                // Both trace and span are active on this thread
-                                let log_body = build_log_body(&record);
-                                println!(
-                                    "{time} {level} [trace-id:{traceid} span-id:{spanid}] [{module}] {body}",
-                                    time = record.time.format(lc.time_format.as_ref()),
-                                    traceid = tr,
-                                    spanid = sp,
-                                    level = record.level,
-                                    module = record.module.unwrap_or("-".to_string()),
-                                    body = log_body
-                                );
-                            }
-                            _ => {
-                                let log_body = build_log_body(&record);
-                                // Both trace and span are not active on this thread
-                                println!(
-                                    "{time} {level} [{module}] {body}",
-                                    time = record.time.format(lc.time_format.as_ref()),
-                                    level = record.level,
-                                    module = record.module.unwrap_or("-".to_string()),
-                                    body = log_body
-                                );
-                            }
-                        }
-                    }
-                }
+                log_config
+                    .as_ref()
+                    .inspect(|lc| filter_log(&storage, lc, &record));
             }
             Ok(TraceCommand::NewSpan(_nanos, data)) => {
                 storage.start_span(Span {
@@ -411,6 +419,7 @@ fn trace_server_loop(
                         client.send(send_vec);
                     }
                 }
+
                 // Tag events only work inside a trace, so get the trace from the thread.
                 // No trace means no tagging.
                 let trace_id_opt = storage.get_trace_id_for_thread(thread_id);
@@ -418,9 +427,11 @@ fn trace_server_loop(
                     if let Some(type_event) = event.remove("error.etype") {
                         storage.span_record_tag(trace_id, "error.type".to_string(), type_event)
                     }
-                    event
-                        .into_iter()
-                        .for_each(|(k, v)| storage.span_record_tag(trace_id, k, v));
+                    event.iter().for_each(|(k, v)| {
+                        if k != "message" {
+                            storage.span_record_tag(trace_id, k.clone(), v.clone());
+                        }
+                    });
                 }
             }
             Ok(TraceCommand::CloseSpan(nanos, span_id)) => {
