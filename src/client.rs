@@ -687,8 +687,8 @@ impl tracing::field::Visit for HashMapVisitor {
     fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
         self.add_value(field, format!("{}", value));
     }
-    fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {
-        // Do nothing
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.add_value(field, format!("{:?}", value));
     }
 }
 
