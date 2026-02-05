@@ -2,12 +2,12 @@ use crate::{client::ApmConfig, model::Span};
 use serde::Serialize;
 use std::collections::HashMap;
 
-const SAMPLING_PRIORITY_KEY: &'static str = "_sampling_priority_v1";
-const ANALYTICS_SAMPLE_RATE_KEY: &'static str = "_dd1.sr.eausr";
-const _SAMPLE_RATE_METRIC_KEY: &'static str = "_sample_rate";
-const _SAMPLING_AGENT_DECISION: &'static str = "_dd.agent_psr";
-const _SAMPLING_RULE_DECISION: &'static str = "_dd.rule_psr";
-const _SAMPLING_LIMIT_DECISION: &'static str = "_dd.limit_psr";
+const SAMPLING_PRIORITY_KEY: &str = "_sampling_priority_v1";
+const ANALYTICS_SAMPLE_RATE_KEY: &str = "_dd1.sr.eausr";
+const _SAMPLE_RATE_METRIC_KEY: &str = "_sample_rate";
+const _SAMPLING_AGENT_DECISION: &str = "_dd.agent_psr";
+const _SAMPLING_RULE_DECISION: &str = "_dd.rule_psr";
+const _SAMPLING_LIMIT_DECISION: &str = "_dd.limit_psr";
 
 fn fill_meta(span: &Span, env: Option<String>) -> HashMap<String, String> {
     let mut meta = HashMap::new();
@@ -57,26 +57,21 @@ pub struct RawSpan {
 }
 
 impl RawSpan {
-    pub fn from_span(
-        span: &Span,
-        service: &String,
-        env: &Option<String>,
-        cfg: &ApmConfig,
-    ) -> RawSpan {
+    pub fn from_span(span: &Span, service: &str, env: &Option<String>, cfg: &ApmConfig) -> RawSpan {
         let http_enabled = span.tags.contains_key("http.url");
         let is_error = span.tags.contains_key("error.message");
         RawSpan {
-            service: service.clone(),
+            service: service.to_string(),
             trace_id: span.trace_id,
             span_id: span.id,
             name: span.name.clone(),
             resource: span.resource.clone(),
             parent_id: span.parent_id,
-            start: span.start.timestamp_nanos() as u64,
+            start: span.start.timestamp_nanos_opt().unwrap_or(0) as u64,
             duration: span.duration.num_nanoseconds().unwrap_or(0) as u64,
             error: if is_error { 1 } else { 0 },
             r#type: if http_enabled { "web" } else { "custom" }.to_string(),
-            meta: fill_meta(&span, env.clone()),
+            meta: fill_meta(span, env.clone()),
             metrics: fill_metrics(cfg),
         }
     }

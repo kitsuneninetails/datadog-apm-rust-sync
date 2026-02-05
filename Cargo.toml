@@ -1,6 +1,6 @@
 [package]
 name = "datadog-apm-sync"
-version = "0.7.0"
+version = "0.7.1"
 authors = ["Michael Micucci <9975355+kitsuneninetails@users.noreply.github.com>", "Fernando Gonçalves <fernando.goncalves@pipefy.com> (original base code)"]
 edition = "2018"
 license = "MIT"
@@ -9,6 +9,7 @@ description = "Datadog APM-compatible tracer and logger for Rust"
 repository = "https://github.com/kitsuneninetails/datadog-apm-rust-sync"
 
 [dependencies]
+atomic_float = "1.1"
 chrono = {version = "0.4.26", default-features = false, features = ["clock"] }
 crossbeam-channel = "0.5.6"
 log = {version = "0.4", features = ["std"] }
