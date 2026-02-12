@@ -1013,7 +1013,10 @@ mod tests {
         let _client = DatadogTracing::new(config)
             .with(
                 filter::targets::Targets::new()
-                    .with_target("aws", level_filters::LevelFilter::OFF)
+                    .with_target(
+                        "datadog_apm_sync::client::tests::test_trace",
+                        level_filters::LevelFilter::OFF,
+                    )
                     .with_default(trace_level),
             )
             .try_init()
@@ -1231,6 +1234,15 @@ mod tests {
         }
     }
 
+    pub mod test_trace {
+        pub fn test_trace_fn() {
+            tracing::event!(
+                tracing::Level::INFO,
+                message = "TEST_INFO EVENT in filtered trace mod - SHOULD ____NOT____ SEE!!"
+            );
+        }
+    }
+
     #[test]
     fn test_log() {
         let _trace_id = create_unique_id64();
@@ -1261,5 +1273,6 @@ mod tests {
         );
 
         test_log::test_log_fn();
+        test_trace::test_trace_fn();
     }
 }
