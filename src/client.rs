@@ -3,7 +3,7 @@ use crate::{api::RawSpan, model::Span};
 use atomic_float::AtomicF64;
 use attohttpc;
 use chrono::{DateTime, Duration, Utc};
-use log::{warn, Level as LogLevel, Log, Record};
+use log::{Level as LogLevel, Log, Record};
 use serde_json::to_string;
 use std::{
     cell::Cell,
@@ -354,7 +354,7 @@ impl SpanStorage {
 }
 
 fn filter_log(storage: &SpanStorage, log_config: &LoggingConfig, record: LogRecord) {
-    let skip = record
+    let mod_skip = record
         .module
         .as_ref()
         .map(|m: &String| {
@@ -368,7 +368,7 @@ fn filter_log(storage: &SpanStorage, log_config: &LoggingConfig, record: LogReco
         .body_filter
         .iter()
         .any(|f| record.msg_str.contains(*f));
-    if !skip && !body_skip {
+    if !mod_skip && !body_skip {
         let log_body = build_log_body(&record);
         match storage
             .get_trace_id_for_thread(record.thread_id)
@@ -537,13 +537,6 @@ impl DatadogTracing {
             // This must be marked unsafe because we are overwriting a global, but it only gets done
             // once in a process's lifetime.
             SAMPLING_RATE.store(sample_rate, Ordering::Release);
-
-            tracing::subscriber::set_global_default(tracer.clone()).unwrap_or_else(|_| {
-                warn!(
-                    "Global subscriber has already been set!  \
-                           This should only be set once in the executable."
-                )
-            });
         }
         tracer
     }
@@ -885,7 +878,8 @@ impl DdAgentClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use log::{debug, info, Level};
+    use log::{debug, info};
+    use tracing::level_filters;
     use tracing::{event, span};
 
     fn long_call(trace_id: u64) {
@@ -1004,27 +998,41 @@ mod tests {
         );
     }
 
-    fn trace_config() {
+    fn trace_config(log_level: log::Level, trace_level: tracing::Level) {
         let config = Config {
             service: String::from("datadog_apm_test"),
             env: Some("staging-01".into()),
             logging_config: Some(LoggingConfig {
-                level: Level::Trace,
-                mod_filter: vec!["hyper", "mime"],
+                level: log_level,
+                mod_filter: vec!["hyper", "mime", "test_log"],
                 ..LoggingConfig::default()
             }),
             enable_tracing: true,
             ..Default::default()
         };
-        let _client = DatadogTracing::new(config);
+        let _client = DatadogTracing::new(config)
+            .with(
+                filter::targets::Targets::new()
+                    .with_target(
+                        "datadog_apm_sync::client::tests::test_trace",
+                        level_filters::LevelFilter::OFF,
+                    )
+                    .with_default(trace_level),
+            )
+            .try_init()
+            .or_else(|e| {
+                log::warn!("Error initializing logger: {e}");
+                Result::<(), ()>::Ok(())
+            })
+            .unwrap();
     }
 
     #[test]
     fn test_exit_child_span() {
-        trace_config();
+        trace_config(log::Level::Trace, tracing::Level::TRACE);
         let trace_id = 1u64;
 
-        let f1 = std::thread::spawn(move || {
+        let f1: std::thread::JoinHandle<()> = std::thread::spawn(move || {
             let span = span!(tracing::Level::INFO, "parent_span", trace_id = trace_id);
             let _e = span.enter();
             info!("Inside parent_span, should print trace and span ID");
@@ -1043,7 +1051,7 @@ mod tests {
     #[test]
     fn test_trace_one_func_stack() {
         let trace_id = create_unique_id64();
-        trace_config();
+        trace_config(log::Level::Trace, tracing::Level::TRACE);
 
         debug!(
             "Outside of span, this should be None: {:?}",
@@ -1071,7 +1079,7 @@ mod tests {
     fn test_parallel_two_threads_two_traces() {
         let trace_id1 = create_unique_id64();
         let trace_id2 = create_unique_id64();
-        trace_config();
+        trace_config(log::Level::Trace, tracing::Level::TRACE);
         let f1 = std::thread::spawn(move || {
             traced_func_no_send(trace_id1);
             event!(tracing::Level::INFO, send_trace = trace_id1);
@@ -1098,7 +1106,7 @@ mod tests {
         let trace_id8 = create_unique_id64() + 7;
         let trace_id9 = create_unique_id64() + 8;
         let trace_id10 = create_unique_id64() + 9;
-        trace_config();
+        trace_config(log::Level::Trace, tracing::Level::TRACE);
         let f1 = std::thread::spawn(move || {
             traced_func_no_send(trace_id1);
             event!(tracing::Level::INFO, send_trace = trace_id1);
@@ -1156,7 +1164,7 @@ mod tests {
     #[test]
     fn test_error_span() {
         let trace_id = create_unique_id64();
-        trace_config();
+        trace_config(log::Level::Trace, tracing::Level::TRACE);
         let f3 = std::thread::spawn(move || {
             traced_error_func(trace_id);
         });
@@ -1167,7 +1175,7 @@ mod tests {
     #[test]
     fn test_error_span_as_single_event() {
         let trace_id = create_unique_id64();
-        trace_config();
+        trace_config(log::Level::Trace, tracing::Level::TRACE);
         let f4 = std::thread::spawn(move || {
             traced_error_func_single_event(trace_id);
         });
@@ -1178,7 +1186,7 @@ mod tests {
     #[test]
     fn test_two_funcs_in_one_span() {
         let trace_id = create_unique_id64();
-        trace_config();
+        trace_config(log::Level::Trace, tracing::Level::TRACE);
         let f5 = std::thread::spawn(move || {
             traced_func_no_send(trace_id);
             traced_func_no_send(trace_id);
@@ -1193,7 +1201,7 @@ mod tests {
     fn test_one_thread_two_funcs_serial_two_traces() {
         let trace_id1 = create_unique_id64();
         let trace_id2 = create_unique_id64();
-        trace_config();
+        trace_config(log::Level::Trace, tracing::Level::TRACE);
         let f7 = std::thread::spawn(move || {
             traced_func_no_send(trace_id1);
             event!(tracing::Level::INFO, send_trace = trace_id1);
@@ -1208,11 +1216,63 @@ mod tests {
     #[test]
     fn test_http_span() {
         let trace_id = create_unique_id64();
-        trace_config();
+        trace_config(log::Level::Trace, tracing::Level::TRACE);
         let f3 = std::thread::spawn(move || {
             traced_http_func(trace_id);
         });
         f3.join().unwrap();
         ::std::thread::sleep(::std::time::Duration::from_millis(1000));
+    }
+
+    pub mod test_log {
+        pub fn test_log_fn() {
+            tracing::event!(
+                tracing::Level::INFO,
+                message = "TEST_INFO EVENT in filtered mod - SHOULD ____NOT____ SEE!!"
+            );
+            log::info!("TEST_INFO LOG in filtered mod - SHOULD ____NOT____ SEE!!");
+        }
+    }
+
+    pub mod test_trace {
+        pub fn test_trace_fn() {
+            tracing::event!(
+                tracing::Level::INFO,
+                message = "TEST_INFO EVENT in filtered trace mod - SHOULD ____NOT____ SEE!!"
+            );
+        }
+    }
+
+    #[test]
+    fn test_log() {
+        let _trace_id = create_unique_id64();
+        trace_config(log::Level::Info, tracing::Level::INFO);
+        log::info!("TEST_INFO - SHOULD SEE!!");
+        log::debug!("TEST_DEBUG - SHOULD NOT SEE!!");
+
+        test_log::test_log_fn();
+    }
+
+    use tracing_subscriber::filter;
+    use tracing_subscriber::prelude::*;
+
+    #[test]
+    fn test_trace_event_log() {
+        let _trace_id = create_unique_id64();
+        trace_config(log::Level::Info, tracing::Level::INFO);
+
+        tracing::info!("TEST_INFO EVENT - SHOULD SEE!!");
+        tracing::debug!("TEST_DEBUG - SHOULD ____NOT____ SEE!!");
+        tracing::event!(
+            tracing::Level::INFO,
+            message = "TEST_INFO EVENT - SHOULD SEE!!"
+        );
+        tracing::event!(
+            tracing::Level::DEBUG,
+            message = "TEST_DEBUG EVENT - SHOULD ____NOT____ SEE!!"
+        );
+
+        test_log::test_log_fn();
+        test_trace::test_trace_fn();
     }
 }
