@@ -470,7 +470,7 @@ fn trace_server_loop(
                             msg_str,
                             module: event.module,
                             #[cfg(feature = "json")]
-                            key_values: HashMap::new(),
+                            key_values: event.fields,
                         };
                         filter_log(&storage, lc, record);
                     }
