@@ -42,36 +42,54 @@ fn fill_metrics(apm_config: &ApmConfig) -> HashMap<String, f64> {
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct RawSpan {
-    service: String,
-    name: String,
-    resource: String,
-    trace_id: u64,
-    span_id: u64,
-    parent_id: Option<u64>,
-    start: u64,
-    duration: u64,
-    error: i32,
-    meta: HashMap<String, String>,
-    metrics: HashMap<String, f64>,
-    r#type: String,
+    pub service: String,
+    pub name: String,
+    pub resource: String,
+    pub trace_id: u64,
+    pub span_id: u64,
+    pub parent_id: Option<u64>,
+    pub start: u64,
+    pub duration: u64,
+    pub error: i32,
+    pub meta: HashMap<String, String>,
+    pub metrics: HashMap<String, f64>,
+    pub r#type: String,
 }
 
 impl RawSpan {
-    pub fn from_span(span: &Span, service: &str, env: &Option<String>, cfg: &ApmConfig) -> RawSpan {
+    pub fn from_span(
+        mut span: Span,
+        service: &str,
+        env: &Option<String>,
+        cfg: &ApmConfig,
+    ) -> RawSpan {
         let http_enabled = span.tags.contains_key("http.url");
         let is_error = span.tags.contains_key("error.message");
+        let resource = span
+            .tags
+            .remove("resource")
+            .or_else(|| {
+                span.tags.get("http.url").map(|url| {
+                    format!(
+                        "{} {url}",
+                        span.tags.get("http.method").unwrap_or(&"?".to_string())
+                    )
+                })
+            })
+            .unwrap_or(span.resource.clone());
+
         RawSpan {
             service: service.to_string(),
             trace_id: span.trace_id,
             span_id: span.id,
             name: span.name.clone(),
-            resource: span.resource.clone(),
+            resource,
             parent_id: span.parent_id,
             start: span.start.timestamp_nanos_opt().unwrap_or(0) as u64,
             duration: span.duration.num_nanoseconds().unwrap_or(0) as u64,
             error: if is_error { 1 } else { 0 },
             r#type: if http_enabled { "web" } else { "custom" }.to_string(),
-            meta: fill_meta(span, env.clone()),
+            meta: fill_meta(&span, env.clone()),
             metrics: fill_metrics(cfg),
         }
     }
