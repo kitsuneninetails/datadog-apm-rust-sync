@@ -315,9 +315,7 @@ impl SpanStorage {
         if let Some(trace_id) = t_id {
             if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
                 ss.enter_span(span_id);
-                //if ss.entered_spans.len() == 1 {
                 self.set_current_trace(thread_id, trace_id);
-                //}
             }
         }
     }
@@ -705,9 +703,7 @@ pub fn set_current_span_id(new_id: Option<SpanId>) {
 // This will hold up to the year 10,000 before it cycles.
 pub fn create_unique_id64() -> u64 {
     let millis_since_epoch = (Utc::now().timestamp_millis() << 16) as u64;
-    let out = millis_since_epoch + UNIQUEID_COUNTER.fetch_add(1, Ordering::Relaxed) as u64;
-    println!("UNIQUE64 OUT = {out}");
-    out
+    millis_since_epoch + UNIQUEID_COUNTER.fetch_add(1, Ordering::Relaxed) as u64
 }
 
 pub struct HashMapVisitor {
@@ -1561,7 +1557,6 @@ mod tests {
             traced_http_func(trace_id);
         });
         f3.join().unwrap();
-        ::std::thread::sleep(::std::time::Duration::from_millis(1000));
 
         let completed = get_completed_spans_from_debug_channel(trace_id);
         assert_eq!(completed.get(0).unwrap().name, "sleep_call");
