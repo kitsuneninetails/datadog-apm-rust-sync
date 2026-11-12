@@ -121,10 +121,15 @@ enum TraceCommand {
 
 type CompletedSpans = Vec<Span>;
 type CurrentSpans = VecDeque<Span>;
+type ParentSpan = Span;
 
 #[derive(Clone, Debug)]
 pub enum DebugData {
-    SpanData(Option<CompletedSpans>, Option<CurrentSpans>),
+    SpanData(
+        Option<CompletedSpans>,
+        Option<CurrentSpans>,
+        Option<ParentSpan>,
+    ),
 }
 
 #[derive(Clone, Debug)]
@@ -170,6 +175,7 @@ struct NewSpanData {
     pub resource: String,
     pub start: DateTime<Utc>,
     pub tags: HashMap<String, String>,
+    pub parent_id: Option<SpanId>,
 }
 
 #[derive(Clone, Debug)]
@@ -192,8 +198,13 @@ impl SpanCollection {
 
     // Open a span by inserting the span into the "current" span map by ID.
     fn start_span(&mut self, span: Span) {
-        let parent_id = Some(self.current_span_id().unwrap_or(self.parent_span.id));
-        self.current_spans.push_back(Span { parent_id, ..span });
+        let parent_id = span
+            .parent_id
+            .unwrap_or_else(|| self.current_span_id().unwrap_or(self.parent_span.id));
+        self.current_spans.push_back(Span {
+            parent_id: Some(parent_id),
+            ..span
+        });
     }
 
     // Move span to "completed" based on ID.
@@ -256,14 +267,6 @@ impl SpanCollection {
         let mut ret = self.drain_current().completed_spans;
         ret.push(parent_span);
         ret
-    }
-
-    fn get_completed_spans(&self) -> Vec<Span> {
-        self.completed_spans.clone()
-    }
-
-    fn get_current_spans(&self) -> VecDeque<Span> {
-        self.current_spans.clone()
     }
 }
 
@@ -351,13 +354,21 @@ impl SpanStorage {
     fn get_completed_spans(&self, trace_id: TraceId) -> Option<Vec<Span>> {
         self.traces
             .get(&trace_id)
-            .map(|ss| ss.get_completed_spans())
+            .map(|ss| ss.completed_spans.clone())
     }
 
     /// For Debugging purposes.  This will clone the span storage's current spans
     /// and return it or None if the trace_id isn't found.
     fn get_current_spans(&self, trace_id: TraceId) -> Option<VecDeque<Span>> {
-        self.traces.get(&trace_id).map(|ss| ss.get_current_spans())
+        self.traces
+            .get(&trace_id)
+            .map(|ss| ss.current_spans.clone())
+    }
+
+    /// For Debugging purposes.  This woill clone the storage's parent span
+    /// and return it or None if the trace_id isn't found.
+    fn get_parent_span(&self, trace_id: TraceId) -> Option<Span> {
+        self.traces.get(&trace_id).map(|ss| ss.parent_span.clone())
     }
 }
 
@@ -423,7 +434,7 @@ fn trace_server_loop(
                     id: data.id,
                     trace_id: data.trace_id,
                     tags: data.tags,
-                    parent_id: None,
+                    parent_id: data.parent_id,
                     start: data.start,
                     name: data.name,
                     resource: data.resource,
@@ -490,8 +501,13 @@ fn trace_server_loop(
                 if let Some(ref dbg_send) = debug_sender {
                     let completed_spans = storage.get_completed_spans(trace_id);
                     let current_spans = storage.get_current_spans(trace_id);
+                    let parent_span = storage.get_parent_span(trace_id);
                     dbg_send
-                        .send(DebugData::SpanData(completed_spans, current_spans))
+                        .send(DebugData::SpanData(
+                            completed_spans,
+                            current_spans,
+                            parent_span,
+                        ))
                         .unwrap_or_else(|e| {
                             println!("ERROR! Can't send to debug channel: {:?}", e)
                         });
@@ -734,6 +750,10 @@ impl tracing::Subscriber for DatadogTracing {
             .fields
             .remove("name")
             .unwrap_or(span.metadata().name().to_string());
+        let parent_id = new_span_visitor
+            .fields
+            .remove("parent_id")
+            .and_then(|s| s.parse::<u64>().ok());
         let span_id = create_unique_id64();
         let new_span = NewSpanData {
             id: span_id,
@@ -742,6 +762,7 @@ impl tracing::Subscriber for DatadogTracing {
             resource,
             name,
             tags: new_span_visitor.fields,
+            parent_id,
         };
         self.send_new_span(nanos, new_span).unwrap_or(());
         tracing::span::Id::from_u64(span_id)
@@ -1080,7 +1101,7 @@ mod tests {
                 .unwrap();
     }
 
-    fn get_completed_spans_from_debug_channel(trace_id: u64) -> Vec<RawSpan> {
+    fn get_spans_from_debug_channel(trace_id: u64) -> (RawSpan, Vec<RawSpan>) {
         let span_info = {
             let _g = DEBUG_CHANNEL_MUTEX.lock().unwrap();
             event!(tracing::Level::INFO, send_debug_state = trace_id);
@@ -1092,14 +1113,17 @@ mod tests {
                 .unwrap()
         };
         match span_info {
-            DebugData::SpanData(Some(complete), Some(current)) => {
+            DebugData::SpanData(Some(completed), Some(current), Some(parent)) => {
                 assert!(current.is_empty());
-                complete
-                    .into_iter()
-                    .map(|span| RawSpan::from_span(span, "", &None, &ApmConfig::default()))
-                    .collect::<Vec<RawSpan>>()
+                (
+                    RawSpan::from_span(parent, "", &None, &ApmConfig::default()),
+                    completed
+                        .into_iter()
+                        .map(|span| RawSpan::from_span(span, "", &None, &ApmConfig::default()))
+                        .collect::<Vec<RawSpan>>(),
+                )
             }
-            DebugData::SpanData(_, _) => panic!("Thread ID not found!"),
+            DebugData::SpanData(_, _, _) => panic!("Thread ID not found!"),
         }
     }
 
@@ -1114,8 +1138,8 @@ mod tests {
             let span2 = tracing::span!(tracing::Level::INFO, "test", trace_id = trace_id);
             let _e2 = span2.enter();
         }
-        let complete = get_completed_spans_from_debug_channel(trace_id);
-        assert_eq!(complete.get(0).unwrap().name, "test");
+        let (_, completed) = get_spans_from_debug_channel(trace_id);
+        assert_eq!(completed.get(0).unwrap().name, "test");
     }
 
     #[test]
@@ -1135,9 +1159,55 @@ mod tests {
             );
             let _e = span.enter();
         }
-        let complete = get_completed_spans_from_debug_channel(trace_id);
-        assert_eq!(complete.get(0).unwrap().name, "test");
-        assert_eq!(complete.get(0).unwrap().meta.get("newtag").unwrap(), "test");
+        let (_, completed) = get_spans_from_debug_channel(trace_id);
+        assert_eq!(completed.get(0).unwrap().name, "test");
+        assert_eq!(
+            completed.get(0).unwrap().meta.get("newtag").unwrap(),
+            "test"
+        );
+    }
+
+    #[test]
+    fn test_set_parent_id() {
+        let trace_id = create_unique_id64();
+
+        trace_config_with_debug_channel(log::Level::Trace, tracing::Level::TRACE);
+        let parent = tracing::span!(
+            tracing::Level::INFO,
+            "parent",
+            trace_id = trace_id,
+            parent_id = 111
+        );
+        let _e = parent.enter();
+
+        let sibling_id = {
+            let span = tracing::span!(tracing::Level::INFO, "test", trace_id = trace_id,);
+            let _e = span.enter();
+            span.id().unwrap().into_u64()
+        };
+        {
+            let span = tracing::span!(
+                tracing::Level::INFO,
+                "test2",
+                trace_id = trace_id,
+                parent_id = sibling_id
+            );
+            let _e = span.enter();
+        }
+        let (dparent, completed) = get_spans_from_debug_channel(trace_id);
+        assert_eq!(completed.get(0).unwrap().name, "test");
+        assert_eq!(
+            completed.get(0).unwrap().parent_id.unwrap(),
+            parent.id().unwrap().into_u64()
+        );
+        assert_eq!(
+            completed.get(0).unwrap().parent_id.unwrap(),
+            dparent.span_id
+        );
+        assert!(dparent.parent_id.is_some());
+        assert_eq!(dparent.parent_id.unwrap(), 111u64);
+        assert_eq!(completed.get(1).unwrap().name, "test2");
+        assert_eq!(completed.get(1).unwrap().parent_id.unwrap(), sibling_id);
     }
 
     #[test]
@@ -1221,7 +1291,7 @@ mod tests {
             tracing::info!(span.type = format!("mytype_later_override_http"));
         }
 
-        let complete = get_completed_spans_from_debug_channel(trace_id);
+        let (_, complete) = get_spans_from_debug_channel(trace_id);
         assert_eq!(complete.len(), 7);
         assert_eq!(complete.get(0).unwrap().r#type, "web");
         assert_eq!(complete.get(1).unwrap().r#type, "custom");
@@ -1283,9 +1353,9 @@ mod tests {
             tracing::info!(http.method = "NO", http.url = "/wrong/path");
         }
 
-        let complete = get_completed_spans_from_debug_channel(trace_id);
-        assert_eq!(complete.len(), 4);
-        complete.into_iter().for_each(|span| {
+        let (_, completed) = get_spans_from_debug_channel(trace_id);
+        assert_eq!(completed.len(), 4);
+        completed.into_iter().for_each(|span| {
             let check_path = format!("GET /my/path/{}", span.name);
             assert_eq!(*span.resource, check_path);
         });
@@ -1325,7 +1395,7 @@ mod tests {
                 traced_func_no_send(trace_id);
             });
             f1.join().unwrap();
-            let completed = get_completed_spans_from_debug_channel(trace_id);
+            let (_, completed) = get_spans_from_debug_channel(trace_id);
             assert_eq!(
                 completed.get(0).unwrap().name,
                 format!("traced_func_no_send_{trace_id}")
@@ -1355,13 +1425,13 @@ mod tests {
         f1.join().unwrap();
         f2.join().unwrap();
 
-        let completed = get_completed_spans_from_debug_channel(trace_id1);
+        let (_, completed) = get_spans_from_debug_channel(trace_id1);
         assert_eq!(
             completed.get(0).unwrap().name,
             format!("traced_func_no_send_{trace_id1}")
         );
 
-        let completed = get_completed_spans_from_debug_channel(trace_id2);
+        let (_, completed) = get_spans_from_debug_channel(trace_id2);
         assert_eq!(
             completed.get(0).unwrap().name,
             format!("traced_func_no_send_{trace_id2}")
@@ -1444,52 +1514,52 @@ mod tests {
         f9.join().unwrap();
         f10.join().unwrap();
 
-        let completed = get_completed_spans_from_debug_channel(trace_id1);
+        let (_, completed) = get_spans_from_debug_channel(trace_id1);
         assert_eq!(
             completed.get(0).unwrap().name,
             format!("traced_func_no_send_{trace_id1}")
         );
-        let completed = get_completed_spans_from_debug_channel(trace_id2);
+        let (_, completed) = get_spans_from_debug_channel(trace_id2);
         assert_eq!(
             completed.get(0).unwrap().name,
             format!("traced_func_no_send_{trace_id2}")
         );
-        let completed = get_completed_spans_from_debug_channel(trace_id3);
+        let (_, completed) = get_spans_from_debug_channel(trace_id3);
         assert_eq!(
             completed.get(0).unwrap().name,
             format!("traced_func_no_send_{trace_id3}")
         );
-        let completed = get_completed_spans_from_debug_channel(trace_id4);
+        let (_, completed) = get_spans_from_debug_channel(trace_id4);
         assert_eq!(
             completed.get(0).unwrap().name,
             format!("traced_func_no_send_{trace_id4}")
         );
-        let completed = get_completed_spans_from_debug_channel(trace_id5);
+        let (_, completed) = get_spans_from_debug_channel(trace_id5);
         assert_eq!(
             completed.get(0).unwrap().name,
             format!("traced_func_no_send_{trace_id5}")
         );
-        let completed = get_completed_spans_from_debug_channel(trace_id6);
+        let (_, completed) = get_spans_from_debug_channel(trace_id6);
         assert_eq!(
             completed.get(0).unwrap().name,
             format!("traced_func_no_send_{trace_id6}")
         );
-        let completed = get_completed_spans_from_debug_channel(trace_id7);
+        let (_, completed) = get_spans_from_debug_channel(trace_id7);
         assert_eq!(
             completed.get(0).unwrap().name,
             format!("traced_func_no_send_{trace_id7}")
         );
-        let completed = get_completed_spans_from_debug_channel(trace_id8);
+        let (_, completed) = get_spans_from_debug_channel(trace_id8);
         assert_eq!(
             completed.get(0).unwrap().name,
             format!("traced_func_no_send_{trace_id8}")
         );
-        let completed = get_completed_spans_from_debug_channel(trace_id9);
+        let (_, completed) = get_spans_from_debug_channel(trace_id9);
         assert_eq!(
             completed.get(0).unwrap().name,
             format!("traced_func_no_send_{trace_id9}")
         );
-        let completed = get_completed_spans_from_debug_channel(trace_id10);
+        let (_, completed) = get_spans_from_debug_channel(trace_id10);
         assert_eq!(
             completed.get(0).unwrap().name,
             format!("traced_func_no_send_{trace_id10}")
@@ -1509,7 +1579,7 @@ mod tests {
         });
         f3.join().unwrap();
 
-        let completed = get_completed_spans_from_debug_channel(trace_id);
+        let (_, completed) = get_spans_from_debug_channel(trace_id);
         assert_eq!(completed.get(0).unwrap().name, "sleep_call");
         assert_eq!(completed.get(1).unwrap().name, "long_call");
         assert_eq!(completed.get(2).unwrap().name, "traced_error_func");
@@ -1532,7 +1602,7 @@ mod tests {
         });
         f4.join().unwrap();
 
-        let completed = get_completed_spans_from_debug_channel(trace_id);
+        let (_, completed) = get_spans_from_debug_channel(trace_id);
         assert_eq!(completed.get(0).unwrap().name, "sleep_call");
         assert_eq!(completed.get(1).unwrap().name, "long_call");
         assert_eq!(
@@ -1560,7 +1630,7 @@ mod tests {
         });
         f5.join().unwrap();
 
-        let completed = get_completed_spans_from_debug_channel(trace_id);
+        let (_, completed) = get_spans_from_debug_channel(trace_id);
         assert_eq!(
             completed.get(0).unwrap().name,
             format!("traced_func_no_send_{trace_id}")
@@ -1587,12 +1657,12 @@ mod tests {
             traced_func_no_send(trace_id2);
         });
         f7.join().unwrap();
-        let completed = get_completed_spans_from_debug_channel(trace_id1);
+        let (_, completed) = get_spans_from_debug_channel(trace_id1);
         assert_eq!(
             completed.get(0).unwrap().name,
             format!("traced_func_no_send_{trace_id1}")
         );
-        let completed = get_completed_spans_from_debug_channel(trace_id2);
+        let (_, completed) = get_spans_from_debug_channel(trace_id2);
         assert_eq!(
             completed.get(0).unwrap().name,
             format!("traced_func_no_send_{trace_id2}")
@@ -1612,7 +1682,7 @@ mod tests {
         });
         f3.join().unwrap();
 
-        let completed = get_completed_spans_from_debug_channel(trace_id);
+        let (_, completed) = get_spans_from_debug_channel(trace_id);
         assert_eq!(completed.get(0).unwrap().name, "sleep_call");
         assert_eq!(completed.get(1).unwrap().name, "long_call");
         assert_eq!(completed.get(2).unwrap().name, "traced_http_func");
