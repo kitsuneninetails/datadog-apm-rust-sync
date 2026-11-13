@@ -6,7 +6,9 @@ use chrono::{DateTime, Duration, Utc};
 use log::{Level as LogLevel, Log, Record};
 use serde_json::to_string;
 use std::{
-    cell::{Cell, LazyCell, RefCell}, collections::{HashMap, HashSet, VecDeque}, sync::{
+    cell::{Cell, LazyCell, RefCell},
+    collections::{HashMap, HashSet, VecDeque},
+    sync::{
         atomic::{AtomicU16, AtomicU32, Ordering},
         mpsc::{self, Sender},
     },
@@ -950,10 +952,7 @@ mod tests {
         let span = span!(tracing::Level::INFO, "sleep_call", trace_id = trace_id);
         let _e = span.enter();
         debug!("Long call {}", trace_id);
-        debug!(
-            "Current thread ID/span ID: {:?}",
-            get_current_span_id()
-        );
+        debug!("Current thread ID/span ID: {:?}", get_current_span_id());
         std::thread::sleep(std::time::Duration::from_millis(2000));
     }
 
