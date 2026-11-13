@@ -654,7 +654,7 @@ impl DatadogTracing {
     }
 }
 
-fn log_level_to_trace_level(level: log::Level) -> tracing::Level {
+pub fn log_level_to_trace_level(level: log::Level) -> tracing::Level {
     use log::Level::*;
     match level {
         Error => tracing::Level::ERROR,
