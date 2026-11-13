@@ -6,10 +6,10 @@ use chrono::{DateTime, Duration, Utc};
 use log::{Level as LogLevel, Log, Record};
 use serde_json::to_string;
 use std::{
-    cell::{Cell, LazyCell, RefCell},
-    collections::{HashMap, HashSet, VecDeque},
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicU16, AtomicU32, Ordering},
+        atomic::{AtomicU16, Ordering},
         mpsc::{self, Sender},
     },
 };
@@ -93,7 +93,6 @@ impl Default for ApmConfig {
 }
 
 type TimeInNanos = u64;
-type ThreadId = u32;
 type TraceId = u64;
 type SpanId = u64;
 
@@ -362,7 +361,7 @@ impl SpanStorage {
     }
 }
 
-fn filter_log(storage: &SpanStorage, log_config: &LoggingConfig, record: LogRecord) {
+fn filter_log(log_config: &LoggingConfig, record: LogRecord) {
     let mod_skip = record
         .module
         .as_ref()
@@ -417,9 +416,7 @@ fn trace_server_loop(
     loop {
         match buffer_receiver.recv() {
             Ok(TraceCommand::Log(record)) => {
-                log_config
-                    .as_ref()
-                    .inspect(|lc| filter_log(&storage, lc, record));
+                log_config.as_ref().inspect(|lc| filter_log(lc, record));
             }
             Ok(TraceCommand::NewSpan(_nanos, data)) => {
                 storage.start_span(Span {
@@ -482,7 +479,7 @@ fn trace_server_loop(
                             #[cfg(feature = "json")]
                             key_values: event.fields,
                         };
-                        filter_log(&storage, lc, record);
+                        filter_log(lc, record);
                     }
                 }
             }
@@ -621,7 +618,7 @@ impl DatadogTracing {
         let command = event
             .remove(SEND_DEBUG_STATE_COMMAND)
             .and_then(|trace_id| trace_id.parse::<u64>().ok())
-            .map(|trace_id| TraceCommand::DebugGetSpanState(trace_id))
+            .map(TraceCommand::DebugGetSpanState)
             .unwrap_or(TraceCommand::Event(EventRecord::new(
                 span_id, event, time, *level, module,
             )));
@@ -641,16 +638,15 @@ pub fn log_level_to_trace_level(level: log::Level) -> tracing::Level {
 }
 
 static UNIQUEID_COUNTER: AtomicU16 = AtomicU16::new(0);
-static THREAD_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 static SAMPLING_RATE: AtomicF64 = AtomicF64::new(0.0);
 
 thread_local! {
-    static CURRENT_SPAN_ID: RefCell<Vec<SpanId>> = RefCell::new(Vec::new());
+    static CURRENT_SPAN_ID: RefCell<Vec<SpanId>> = const { RefCell::new(Vec::new()) }
 }
 
 pub fn get_current_span_id() -> Option<SpanId> {
-    CURRENT_SPAN_ID.with(|id| id.borrow().iter().rev().next().cloned())
+    CURRENT_SPAN_ID.with(|id| id.borrow().iter().next_back().cloned())
 }
 
 pub fn push_current_span_id(new_id: SpanId) {
