@@ -6,9 +6,7 @@ use chrono::{DateTime, Duration, Utc};
 use log::{Level as LogLevel, Log, Record};
 use serde_json::to_string;
 use std::{
-    cell::Cell,
-    collections::{HashMap, VecDeque},
-    sync::{
+    cell::{Cell, LazyCell, RefCell}, collections::{HashMap, HashSet, VecDeque}, sync::{
         atomic::{AtomicU16, AtomicU32, Ordering},
         mpsc::{self, Sender},
     },
@@ -99,7 +97,8 @@ type SpanId = u64;
 
 #[derive(Clone, Debug)]
 struct LogRecord {
-    pub thread_id: ThreadId,
+    pub trace_id: Option<TraceId>,
+    pub span_id: Option<SpanId>,
     pub level: tracing::Level,
     pub time: DateTime<Utc>,
     pub msg_str: String,
@@ -112,7 +111,7 @@ struct LogRecord {
 enum TraceCommand {
     Log(LogRecord),
     NewSpan(TimeInNanos, NewSpanData),
-    Enter(TimeInNanos, ThreadId, SpanId),
+    Enter(TimeInNanos, SpanId),
     Exit(TimeInNanos, SpanId),
     CloseSpan(TimeInNanos, SpanId),
     Event(EventRecord),
@@ -129,7 +128,7 @@ pub enum DebugData {
 
 #[derive(Clone, Debug)]
 struct EventRecord {
-    thread_id: ThreadId,
+    span_id: Option<SpanId>,
     fields: HashMap<String, String>,
     time: DateTime<Utc>,
     level: tracing::Level,
@@ -140,7 +139,7 @@ struct EventRecord {
 
 impl EventRecord {
     pub fn new(
-        thread_id: ThreadId,
+        span_id: Option<SpanId>,
         mut fields: HashMap<String, String>,
         time: DateTime<Utc>,
         level: tracing::Level,
@@ -151,7 +150,7 @@ impl EventRecord {
             .and_then(|tr_str| tr_str.parse::<u64>().ok());
         let message = fields.remove("message");
         EventRecord {
-            thread_id,
+            span_id,
             fields,
             time,
             level,
@@ -270,8 +269,6 @@ impl SpanCollection {
 struct SpanStorage {
     traces: HashMap<TraceId, SpanCollection>,
     spans_to_trace_id: HashMap<SpanId, TraceId>,
-    current_trace_for_thread: HashMap<ThreadId, TraceId>,
-    current_thread_for_trace: HashMap<TraceId, ThreadId>,
 }
 
 impl SpanStorage {
@@ -279,9 +276,11 @@ impl SpanStorage {
         SpanStorage {
             traces: HashMap::new(),
             spans_to_trace_id: HashMap::new(),
-            current_trace_for_thread: HashMap::new(),
-            current_thread_for_trace: HashMap::new(),
         }
+    }
+
+    fn get_trace_id_for_span(&self, span_id: SpanId) -> Option<TraceId> {
+        self.spans_to_trace_id.get(&span_id).cloned()
     }
 
     // Either start a new trace with the span's trace ID (if there is no span already
@@ -309,12 +308,11 @@ impl SpanStorage {
 
     /// Enter a span for trace, and keep track so that new spans get the correct parent.
     /// Keep track of which trace the current thread is in (for logging and events)
-    fn enter_span(&mut self, thread_id: ThreadId, span_id: SpanId) {
+    fn enter_span(&mut self, span_id: SpanId) {
         let t_id = self.spans_to_trace_id.get(&span_id).copied();
         if let Some(trace_id) = t_id {
             if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
                 ss.enter_span(span_id);
-                self.set_current_trace(thread_id, trace_id);
             }
         }
     }
@@ -325,9 +323,6 @@ impl SpanStorage {
         if let Some(trace_id) = trace_id {
             if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
                 ss.exit_span(span_id);
-                if ss.entered_spans.is_empty() {
-                    self.remove_current_trace(trace_id);
-                }
             }
         }
     }
@@ -348,27 +343,6 @@ impl SpanStorage {
         if let Some(ref mut ss) = self.traces.get_mut(&trace_id) {
             ss.add_tag(key, value)
         }
-    }
-
-    fn get_trace_id_for_thread(&self, thread_id: ThreadId) -> Option<u64> {
-        self.current_trace_for_thread.get(&thread_id).copied()
-    }
-
-    fn set_current_trace(&mut self, thread_id: ThreadId, trace_id: TraceId) {
-        self.current_trace_for_thread.insert(thread_id, trace_id);
-        self.current_thread_for_trace.insert(trace_id, thread_id);
-    }
-
-    fn remove_current_trace(&mut self, trace_id: TraceId) {
-        let thread_id = self.current_thread_for_trace.remove(&trace_id);
-        if let Some(thr) = thread_id {
-            self.current_trace_for_thread.remove(&thr);
-        }
-    }
-
-    /// Get the id, if present, of the most current span for the given trace
-    fn current_span_id(&self, trace_id: TraceId) -> Option<SpanId> {
-        self.traces.get(&trace_id).and_then(|s| s.current_span_id())
     }
 
     /// For Debugging purposes.  This will clone the span storage's completed spans
@@ -403,11 +377,8 @@ fn filter_log(storage: &SpanStorage, log_config: &LoggingConfig, record: LogReco
         .any(|f| record.msg_str.contains(*f));
     if !mod_skip && !body_skip {
         let log_body = build_log_body(&record);
-        match storage
-            .get_trace_id_for_thread(record.thread_id)
-            .and_then(|tr_id| storage.current_span_id(tr_id).map(|sp_id| (tr_id, sp_id)))
-        {
-            Some((tr, sp)) => {
+        match (record.trace_id, record.span_id) {
+            (Some(tr), Some(sp)) => {
                 // Both trace and span are active on this thread
                 println!(
                     "{time} {level} [trace-id:{traceid} span-id:{spanid}] [{module}] {body}",
@@ -461,8 +432,8 @@ fn trace_server_loop(
                     duration: Duration::seconds(0),
                 });
             }
-            Ok(TraceCommand::Enter(_nanos, thread_id, span_id)) => {
-                storage.enter_span(thread_id, span_id);
+            Ok(TraceCommand::Enter(_nanos, span_id)) => {
+                storage.enter_span(span_id);
             }
             Ok(TraceCommand::Exit(_nanos, span_id)) => {
                 storage.exit_span(span_id);
@@ -475,7 +446,6 @@ fn trace_server_loop(
                     let send_vec = storage.drain_completed(send_trace_id, event.time);
                     // Thread has ended this trace.  Until it enters a new span, it
                     // is not in a trace.
-                    storage.remove_current_trace(send_trace_id);
                     if !send_vec.is_empty() {
                         client.send(send_vec);
                     }
@@ -483,7 +453,9 @@ fn trace_server_loop(
 
                 // Tag events only work inside a trace, so get the trace from the thread.
                 // No trace means no tagging.
-                let trace_id_opt = storage.get_trace_id_for_thread(event.thread_id);
+                let trace_id_opt = event
+                    .span_id
+                    .and_then(|id| storage.get_trace_id_for_span(id));
                 if let Some(trace_id) = trace_id_opt {
                     if let Some(type_event) = event.fields.remove("error.etype") {
                         storage.span_record_tag(trace_id, "error.type".to_string(), type_event)
@@ -499,7 +471,8 @@ fn trace_server_loop(
                 if let Some(ref lc) = log_config {
                     if let Some(msg_str) = event.message {
                         let record = LogRecord {
-                            thread_id: event.thread_id,
+                            trace_id: trace_id_opt,
+                            span_id: event.span_id,
                             level: event.level,
                             time: event.time,
                             msg_str,
@@ -614,9 +587,9 @@ impl DatadogTracing {
             .map_err(|_| ())
     }
 
-    fn send_enter_span(&self, nanos: u64, thread_id: ThreadId, id: SpanId) -> Result<(), ()> {
+    fn send_enter_span(&self, nanos: u64, id: SpanId) -> Result<(), ()> {
         self.buffer_sender
-            .send(TraceCommand::Enter(nanos, thread_id, id))
+            .send(TraceCommand::Enter(nanos, id))
             .map(|_| ())
             .map_err(|_| ())
     }
@@ -637,7 +610,7 @@ impl DatadogTracing {
 
     fn send_event(
         &self,
-        thread_id: ThreadId,
+        span_id: Option<SpanId>,
         mut event: HashMap<String, String>,
         time: DateTime<Utc>,
         level: &tracing::Level,
@@ -648,7 +621,7 @@ impl DatadogTracing {
             .and_then(|trace_id| trace_id.parse::<u64>().ok())
             .map(|trace_id| TraceCommand::DebugGetSpanState(trace_id))
             .unwrap_or(TraceCommand::Event(EventRecord::new(
-                thread_id, event, time, *level, module,
+                span_id, event, time, *level, module,
             )));
         self.buffer_sender.send(command).map(|_| ()).map_err(|_| ())
     }
@@ -671,21 +644,22 @@ static THREAD_COUNTER: AtomicU32 = AtomicU32::new(0);
 static SAMPLING_RATE: AtomicF64 = AtomicF64::new(0.0);
 
 thread_local! {
-    static THREAD_ID: ThreadId = THREAD_COUNTER.fetch_add(1, Ordering::Relaxed);
-    static CURRENT_SPAN_ID: Cell<Option<SpanId>> = const { Cell::new(None) }
-}
-
-pub fn get_thread_id() -> ThreadId {
-    THREAD_ID.with(|id| *id)
+    static CURRENT_SPAN_ID: RefCell<Vec<SpanId>> = RefCell::new(Vec::new());
 }
 
 pub fn get_current_span_id() -> Option<SpanId> {
-    CURRENT_SPAN_ID.with(|id| id.get())
+    CURRENT_SPAN_ID.with(|id| id.borrow().iter().rev().next().cloned())
 }
 
-pub fn set_current_span_id(new_id: Option<SpanId>) {
+pub fn push_current_span_id(new_id: SpanId) {
     CURRENT_SPAN_ID.with(|id| {
-        id.set(new_id);
+        id.borrow_mut().push(new_id);
+    })
+}
+
+pub fn pop_current_span_id() {
+    CURRENT_SPAN_ID.with(|id| {
+        id.borrow_mut().pop();
     })
 }
 
@@ -780,11 +754,11 @@ impl tracing::Subscriber for DatadogTracing {
     fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
 
     fn event(&self, event: &tracing::Event<'_>) {
-        let thread_id = get_thread_id();
+        let span_id = get_current_span_id();
         let mut new_evt_visitor = HashMapVisitor::new();
         event.record(&mut new_evt_visitor);
         self.send_event(
-            thread_id,
+            span_id,
             new_evt_visitor.fields,
             Utc::now(),
             event.metadata().level(),
@@ -795,17 +769,16 @@ impl tracing::Subscriber for DatadogTracing {
 
     fn enter(&self, span: &tracing::span::Id) {
         let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
-        let thread_id = get_thread_id();
-        self.send_enter_span(nanos, thread_id, span.clone().into_u64())
+        self.send_enter_span(nanos, span.clone().into_u64())
             .unwrap_or(());
-        set_current_span_id(Some(span.into_u64()));
+        push_current_span_id(span.into_u64());
     }
 
     fn exit(&self, span: &tracing::span::Id) {
         let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
         self.send_exit_span(nanos, span.clone().into_u64())
             .unwrap_or(());
-        set_current_span_id(None);
+        pop_current_span_id();
     }
 
     fn try_close(&self, span: tracing::span::Id) -> bool {
@@ -851,11 +824,11 @@ impl Log for DatadogTracing {
             #[cfg(feature = "json")]
             let key_values = build_key_value_map(record);
             if record.level() <= lc.level {
-                let thread_id = get_thread_id();
                 let now = chrono::Utc::now();
                 let msg_str = format!("{}", record.args());
                 let log_rec = LogRecord {
-                    thread_id,
+                    trace_id: None,
+                    span_id: None,
                     level: log_level_to_trace_level(record.level()),
                     time: now,
                     module: record.module_path().map(|s| s.to_string()),
@@ -978,8 +951,7 @@ mod tests {
         let _e = span.enter();
         debug!("Long call {}", trace_id);
         debug!(
-            "Current thread ID/span ID: {}/{:?}",
-            get_thread_id(),
+            "Current thread ID/span ID: {:?}",
             get_current_span_id()
         );
         std::thread::sleep(std::time::Duration::from_millis(2000));
