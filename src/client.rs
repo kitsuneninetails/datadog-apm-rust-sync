@@ -117,7 +117,6 @@ enum TraceCommand {
     CloseSpan(TimeInNanos, SpanId),
     Event(EventRecord),
     DebugGetSpanState(TraceId),
-    Quit,
 }
 
 type CompletedSpans = Vec<Span>;
@@ -525,9 +524,6 @@ fn trace_server_loop(
                             println!("ERROR! Can't send to debug channel: {:?}", e)
                         });
                 }
-            }
-            Ok(TraceCommand::Quit) => {
-                break;
             }
             Err(_) => {
                 return;
