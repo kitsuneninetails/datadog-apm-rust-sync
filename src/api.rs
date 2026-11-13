@@ -77,7 +77,10 @@ impl RawSpan {
                 })
             })
             .unwrap_or(span.resource.clone());
-
+        let span_type = span
+            .tags
+            .remove("span.type")
+            .unwrap_or_else(|| if http_enabled { "web" } else { "custom" }.to_string());
         RawSpan {
             service: service.to_string(),
             trace_id: span.trace_id,
@@ -88,7 +91,7 @@ impl RawSpan {
             start: span.start.timestamp_nanos_opt().unwrap_or(0) as u64,
             duration: span.duration.num_nanoseconds().unwrap_or(0) as u64,
             error: if is_error { 1 } else { 0 },
-            r#type: if http_enabled { "web" } else { "custom" }.to_string(),
+            r#type: span_type,
             meta: fill_meta(&span, env.clone()),
             metrics: fill_metrics(cfg),
         }

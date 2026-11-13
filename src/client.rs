@@ -1174,6 +1174,97 @@ mod tests {
     }
 
     #[test]
+    fn test_span_type_from_tags() {
+        let trace_id = create_unique_id64();
+
+        trace_config_with_debug_channel(log::Level::Trace, tracing::Level::TRACE);
+        let parent = tracing::span!(tracing::Level::INFO, "parent", trace_id = trace_id);
+        let _e = parent.enter();
+
+        //Make an HTTP span to make sure its type is set to "web"
+        {
+            let span = tracing::span!(
+                tracing::Level::INFO,
+                "web",
+                trace_id = trace_id,
+                http.url = "/my/path/test1",
+                http.method = "GET"
+            );
+            let _e = span.enter();
+        }
+        //Make a normal span and make sure type is set to "custom"
+        {
+            let span = tracing::span!(
+                tracing::Level::INFO,
+                "custom",
+                trace_id = trace_id,
+                resource = "GET /my/path/test2",
+            );
+            let _e = span.enter();
+        }
+        //Make a normal span and set its type
+        {
+            let span = tracing::span!(
+                tracing::Level::INFO,
+                "normal",
+                trace_id = trace_id,
+                span.type = "mytype_normal",
+            );
+            let _e = span.enter();
+        }
+        //Make an HTTP span and set its type, make sure override is used
+        {
+            let span = tracing::span!(
+                tracing::Level::INFO,
+                "override",
+                trace_id = trace_id,
+                span.type = "mytype_override",
+                http.url = "/wrong/path",
+                http.method = "NO"
+            );
+            let _e = span.enter();
+        }
+        // Can set type on later event
+        {
+            let span = tracing::span!(tracing::Level::INFO, "later", trace_id = trace_id);
+            let _e = span.enter();
+            tracing::info!(span.type = "mytype_later");
+        }
+        // Even when set on later event, type tag should take precedence
+        {
+            let span = tracing::span!(
+                tracing::Level::INFO,
+                "later_override",
+                trace_id = trace_id,
+                span.type = "no"
+            );
+            let _e = span.enter();
+            tracing::info!(span.type = "mytype_later_override");
+        }
+        // Even when set on HTTP span in later event, type tag should take precedence
+        {
+            let span = tracing::span!(
+                tracing::Level::INFO,
+                "later_override_http",
+                trace_id = trace_id,
+                http.url = "/wrong/path",
+                http.method = "NO"
+            );
+            let _e = span.enter();
+            tracing::info!(span.type = format!("mytype_later_override_http"));
+        }
+
+        let complete = get_completed_spans_from_debug_channel(trace_id);
+        assert_eq!(complete.len(), 7);
+        assert_eq!(complete.get(0).unwrap().r#type, "web");
+        assert_eq!(complete.get(1).unwrap().r#type, "custom");
+        complete[2..].into_iter().for_each(|span| {
+            let check_type = format!("mytype_{}", span.name);
+            assert_eq!(*span.r#type, check_type);
+        });
+    }
+
+    #[test]
     fn test_resource_tag_from_http_uri_method() {
         let trace_id = create_unique_id64();
 
