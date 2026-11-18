@@ -1,4 +1,4 @@
-use crate::{client::ApmConfig, model::Span};
+use crate::models::{apm_config::ApmConfig, span::Span};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -41,28 +41,23 @@ fn fill_metrics(apm_config: &ApmConfig) -> HashMap<String, f64> {
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
-pub struct RawSpan {
-    pub service: String,
-    pub name: String,
-    pub resource: String,
-    pub trace_id: u64,
-    pub span_id: u64,
-    pub parent_id: Option<u64>,
-    pub start: u64,
-    pub duration: u64,
-    pub error: i32,
-    pub meta: HashMap<String, String>,
-    pub metrics: HashMap<String, f64>,
-    pub r#type: String,
+pub struct DatadogSpan {
+    pub(crate) service: String,
+    pub(crate) name: String,
+    pub(crate) resource: String,
+    pub(crate) trace_id: u64,
+    pub(crate) span_id: u64,
+    pub(crate) parent_id: Option<u64>,
+    pub(crate) start: u64,
+    pub(crate) duration: u64,
+    pub(crate) error: i32,
+    pub(crate) meta: HashMap<String, String>,
+    pub(crate) metrics: HashMap<String, f64>,
+    pub(crate) r#type: String,
 }
 
-impl RawSpan {
-    pub fn from_span(
-        mut span: Span,
-        service: &str,
-        env: &Option<String>,
-        cfg: &ApmConfig,
-    ) -> RawSpan {
+impl DatadogSpan {
+    pub fn from_span(mut span: Span, service: &str, env: &Option<String>, cfg: &ApmConfig) -> Self {
         let http_enabled = span.tags.contains_key("http.url");
         let is_error = span.tags.contains_key("error.message");
         let resource = span
@@ -76,20 +71,20 @@ impl RawSpan {
                     )
                 })
             })
-            .unwrap_or(span.resource.clone());
+            .unwrap_or(span.target.clone());
         let span_type = span
             .tags
             .remove("span.type")
             .unwrap_or_else(|| if http_enabled { "web" } else { "custom" }.to_string());
-        RawSpan {
+        DatadogSpan {
             service: service.to_string(),
             trace_id: span.trace_id,
             span_id: span.id,
             name: span.name.clone(),
             resource,
             parent_id: span.parent_id,
-            start: span.start.timestamp_nanos_opt().unwrap_or(0) as u64,
-            duration: span.duration.num_nanoseconds().unwrap_or(0) as u64,
+            start: span.start,
+            duration: span.duration,
             error: if is_error { 1 } else { 0 },
             r#type: span_type,
             meta: fill_meta(&span, env.clone()),
