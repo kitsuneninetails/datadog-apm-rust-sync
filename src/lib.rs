@@ -16,7 +16,6 @@ pub use crate::{
 };
 
 use crate::models::trace_command::TraceCommand;
-use atomic_float::AtomicF64;
 use std::sync::{
     atomic::AtomicU16,
     mpsc::{channel, Receiver, Sender},
@@ -36,4 +35,3 @@ static COMMAND_CHANNEL_RECEIVER: LazyLock<(Sender<TraceCommand>, Mutex<Receiver<
     });
 
 static UNIQUEID_COUNTER: AtomicU16 = AtomicU16::new(0);
-static SAMPLING_RATE: AtomicF64 = AtomicF64::new(0.0);

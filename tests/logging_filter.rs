@@ -32,8 +32,6 @@ mod ends_with_my_test {
 #[ignore]
 async fn test_log_filters() {
     let config = Config {
-        service: String::from("datadog_apm_test"),
-        env: Some("staging-01".into()),
         logging_config: Some(LoggingConfig {
             level: log::Level::Error,
             mod_filter: vec!["my_test"],

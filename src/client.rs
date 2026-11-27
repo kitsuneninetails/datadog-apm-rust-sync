@@ -1,4 +1,6 @@
-use crate::models::{apm_config::ApmConfig, config::Config, datadog_span::DatadogSpan, span::Span};
+use crate::models::{
+    apm_config::ApmConfig, config::DdAgentConfig, datadog_span::DatadogSpan, span::Span,
+};
 
 use attohttpc;
 use serde_json::to_string;
@@ -9,12 +11,12 @@ pub struct DdAgentClient {
 }
 
 impl DdAgentClient {
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &DdAgentConfig) -> Self {
         let (client_sender, client_requests) = crossbeam_channel::unbounded();
 
         for _ in 0..config.num_client_send_threads {
-            let env = config.env.clone();
-            let service = config.service.clone();
+            let env = config.apm_config.env.clone();
+            let service = config.apm_config.service.clone();
             let host = config.host.clone();
             let port = config.port.clone();
             let apm_config = config.apm_config.clone();

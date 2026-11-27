@@ -12,12 +12,12 @@ use crate::{
     },
     trace_server_loop::trace_server_loop,
     utils::log_level_to_trace_level,
-    SpanId, TraceId, COMMAND_CHANNEL_RECEIVER, SAMPLING_RATE, SEND_DEBUG_STATE_COMMAND,
+    SpanId, TraceId, COMMAND_CHANNEL_RECEIVER, SEND_DEBUG_STATE_COMMAND,
 };
 use chrono::{DateTime, Utc};
 use log::{Log, Record};
 use std::collections::HashMap;
-use std::sync::{atomic::Ordering, mpsc::Sender};
+use std::sync::mpsc::Sender;
 use tracing::{span, Subscriber};
 use tracing_subscriber::registry::LookupSpan;
 
@@ -42,8 +42,9 @@ impl DatadogTracing {
         config: Config,
         debug_sender: Option<Sender<DebugData>>,
     ) -> DatadogTracing {
-        let sample_rate = config.apm_config.sample_rate;
-        let client = DdAgentClient::new(&config);
+        let client = config
+            .dd_agent
+            .map(|dd_agent_config| DdAgentClient::new(&dd_agent_config));
 
         let log_config = config.logging_config.clone();
         std::thread::spawn(move || trace_server_loop(client, debug_sender, log_config));
@@ -53,20 +54,12 @@ impl DatadogTracing {
         };
 
         if let Some(ref lc) = tracer.log_config {
-            let _ = log::set_boxed_logger(Box::new(tracer.clone()));
-            log::set_max_level(lc.level.to_level_filter());
-        }
-        if config.enable_tracing {
-            // Only set the global sample rate once when the tracer is set as the global tracer.
-            // This must be marked unsafe because we are overwriting a global, but it only gets done
-            // once in a process's lifetime.
-            SAMPLING_RATE.store(sample_rate, Ordering::Release);
+            if lc.enable_logging == true {
+                let _ = log::set_boxed_logger(Box::new(tracer.clone()));
+                log::set_max_level(lc.level.to_level_filter());
+            }
         }
         tracer
-    }
-
-    pub fn get_global_sampling_rate() -> f64 {
-        SAMPLING_RATE.load(Ordering::Acquire)
     }
 
     fn send_log(&self, record: LogRecord) -> Result<(), ()> {
@@ -218,7 +211,7 @@ where
             .current_span()
             .id()
             .and_then(|id| get_trace_id_from_span_extension_data(id, &ctx));
-
+        println!("EVENT TARGET={:?}", event.metadata().target());
         self.send_event(
             trace_id,
             ctx.current_span().id().map(|id| id.into_u64()),
@@ -410,8 +403,6 @@ mod tests {
 
     fn trace_config_with_debug_channel(log_level: log::Level, trace_level: tracing::Level) {
         let config = Config {
-            service: String::from("datadog_apm_test"),
-            env: Some("staging-01".into()),
             logging_config: Some(LoggingConfig {
                 level: log_level,
                 mod_filter: vec!["hyper", "mime", "test_log"],
@@ -449,7 +440,7 @@ mod tests {
                 .1
                 .lock()
                 .unwrap()
-                .recv_timeout(std::time::Duration::from_secs(2))
+                .recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap()
         };
         match span_info {

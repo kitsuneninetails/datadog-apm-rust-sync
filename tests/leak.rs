@@ -6,8 +6,6 @@ use tracing::{event, span};
 #[ignore]
 async fn test_leak() {
     let config = Config {
-        service: String::from("datadog_apm_test"),
-        env: Some("staging-01".into()),
         logging_config: Some(LoggingConfig {
             level: log::Level::Warn,
             mod_filter: vec!["hyper", "mime", "datadog_apm_sync::client"],

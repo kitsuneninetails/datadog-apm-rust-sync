@@ -11,7 +11,7 @@ use crate::{
 use std::sync::mpsc::Sender;
 
 pub(crate) fn trace_server_loop(
-    client: DdAgentClient,
+    client: Option<DdAgentClient>,
     debug_sender: Option<Sender<DebugData>>,
     log_config: Option<LoggingConfig>,
 ) {
@@ -66,9 +66,11 @@ pub(crate) fn trace_server_loop(
             Ok(TraceCommand::SendTrace(trace_id)) => {
                 let send_vec = storage.drain_spans_for_trace(trace_id);
                 // Thread has ended this trace.  Until it enters a new span, it
-                // is not in a trace.x
+                // is not in a trace.
                 if !send_vec.is_empty() {
-                    client.send(send_vec);
+                    if let Some(ref cl) = client {
+                        cl.send(send_vec);
+                    }
                 }
             }
             Ok(TraceCommand::DebugGetSpanState(trace_id)) => {
